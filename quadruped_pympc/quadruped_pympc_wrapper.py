@@ -46,6 +46,9 @@ class QuadrupedPyMPC_Wrapper:
 
         self.quadrupedpympc_observables_names = quadrupedpympc_observables_names
         self.quadrupedpympc_observables = {}
+        self.latest_state_current = None
+        self.latest_ref_state = None
+        self.latest_contact_sequence = None
 
     def compute_actions(
         self,
@@ -129,6 +132,9 @@ class QuadrupedPyMPC_Wrapper:
                 mujoco_contact,
             )
         )
+        self.latest_state_current = state_current
+        self.latest_ref_state = ref_state
+        self.latest_contact_sequence = contact_sequence
 
         # Solve OCP ---------------------------------------------------------------------------------------
         if step_num % round(1 / (self.mpc_frequency * simulation_dt)) == 0:
@@ -257,3 +263,6 @@ class QuadrupedPyMPC_Wrapper:
 
         self.wb_interface.reset(initial_feet_pos)
         self.srbd_controller_interface.controller.reset()
+        self.latest_state_current = None
+        self.latest_ref_state = None
+        self.latest_contact_sequence = None

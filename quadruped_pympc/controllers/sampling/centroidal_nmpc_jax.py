@@ -23,23 +23,33 @@ class Sampling_MPC:
     def __init__(
         self,
     ):
-
+        # ---- Global sampling/controller configuration -----------
+        # Read the high-level optimizer settings from config so the controller knows:
+        # (CPU/GPU),
         device = config.mpc_params["device"]
-        self.num_parallel_computations = config.mpc_params["num_parallel_computations"]
+        # which sampling rule to use (random, MPPI, or CEM-MPPI).
         self.sampling_method = config.mpc_params["sampling_method"]
         self.control_parametrization = config.mpc_params["control_parametrization"]
+        # number of samples
+        self.num_parallel_computations = config.mpc_params["num_parallel_computations"]
+        # number of iterations
         self.num_sampling_iterations = config.mpc_params["num_sampling_iterations"]
+        # Sampling time
         self.dt = config.mpc_params["dt"]
+        # prediction horizon
         self.horizon = config.mpc_params["horizon"]
 
+        # State and control input dimensions
         self.state_dim = 24
         self.control_dim = 24
         self.reference_dim = self.state_dim
 
+        # maximum values for sampling the forces
         self.max_sampling_forces_x = 10
         self.max_sampling_forces_y = 10
         self.max_sampling_forces_z = 30
 
+        # Select the JAX execution device
         if device == "gpu":
             try:
                 self.device = jax.devices("gpu")[0]
@@ -49,9 +59,10 @@ class Sampling_MPC:
         else:
             self.device = jax.devices('cpu')[0]
 
+        # Define how forces are parametrized over the horizon 
+        # either linear splines, cubic splines, or zero-order hold.
         if self.control_parametrization == "linear_spline":
-            # Along the horizon, we have 2 splines per control input (3 forces)
-            # Each spline has 2 parameters, but one is shared between the two splines
+
             self.num_spline = config.mpc_params['num_splines']
             self.num_control_parameters_single_leg = (self.num_spline + 1) * 3
 
@@ -92,14 +103,17 @@ class Sampling_MPC:
             self.spline_fun_RL = self.compute_zero_order_spline
             self.spline_fun_RR = self.compute_zero_order_spline
             
-
+        # Select the sampling update rule 
         if self.sampling_method == 'random_sampling':
+            # - random_sampling: keep the single best sample
             self.compute_control = self.compute_control_random_sampling
             self.sigma_random_sampling = config.mpc_params['sigma_random_sampling']
         elif self.sampling_method == 'mppi':
+            # - mppi: weighted update from all samples
             self.compute_control = self.compute_control_mppi
             self.sigma_mppi = config.mpc_params['sigma_mppi']
         elif self.sampling_method == 'cem_mppi':
+            # - cem_mppi: MPPI-style update with adaptive sampling variance
             self.compute_control = self.compute_control_cem_mppi
             self.sigma_cem_mppi = (
                 jnp.ones(self.num_control_parameters, dtype=dtype_general) * config.mpc_params['sigma_cem_mppi']
@@ -109,12 +123,17 @@ class Sampling_MPC:
             print("Error: sampling method not recognized")
             sys.exit(1)
 
+        # JIT-compile the selected control update so repeated MPC calls run on the chosen device.
         self.jitted_compute_control = jax.jit(self.compute_control, device=self.device)
 
-        # Initialize the robot model
+        # Build the centroidal prediction model
+        # This is the simplified dynamics used to roll each sample forward over the horizon.
         self.robot = Centroidal_Model_JAX(self.dt, self.device)
 
-        # Initialize the cost function matrices
+        # Cost weights 
+        # Q penalizes state-tracking error across the predicted centroidal trajectory.
+        # The state is:
+        # [com position, com velocity, base orientation, base angular velocity, foot positions].
         self.Q = jnp.identity(self.state_dim, dtype=dtype_general) * 0
         self.Q = self.Q.at[0, 0].set(0.0)
         self.Q = self.Q.at[1, 1].set(0.0)
@@ -156,13 +175,17 @@ class Sampling_MPC:
         self.R = self.R.at[22, 22].set(0.1)  # foot_force_y_RR
         self.R = self.R.at[23, 23].set(0.001)  # foot_force_z_RR
 
-        # mu is the friction coefficient
+        # Contact and force limits 
+        # These parameters are used later to clamp sampled forces into feasible contact forces.
         self.mu = config.mpc_params["mu"]
 
         # maximum allowed z contact forces
         self.f_z_max = config.mpc_params['grf_max']
         self.f_z_min = config.mpc_params['grf_min']
 
+        # Optimizer memory
+        # Keep the previously best solution and a master RNG key so the controller can sample
+        # around the last good force trajectory at the next iteration.
         self.best_control_parameters = jnp.zeros((self.num_control_parameters,), dtype=dtype_general)
         self.master_key = jax.random.PRNGKey(42)
         self.initial_random_parameters = jax.random.uniform(
@@ -172,7 +195,9 @@ class Sampling_MPC:
             shape=(self.num_parallel_computations, self.num_control_parameters),
         )
 
-        # jitting the vmap function!
+        # ---- Parallel rollout machinery -------------------------
+        # Evaluate one rollout per sampled control sequence in parallel with vmap, then JIT the
+        # whole batched evaluation so the optimizer can score many candidates efficiently.
         self.vectorized_rollout = jax.vmap(self.compute_rollout, in_axes=(None, None, 0, None), out_axes=0)
         self.jit_vectorized_rollout = jax.jit(self.vectorized_rollout, device=self.device)
 
@@ -451,7 +476,7 @@ class Sampling_MPC:
             error_cost = state_error.T @ self.Q @ state_error
 
             # Calculate cost regulation input
-            """input_for_cost = jnp.array(
+            input_for_cost = jnp.array(
                 [
                     jnp.float32(0),
                     jnp.float32(0),
@@ -481,7 +506,7 @@ class Sampling_MPC:
                 dtype=dtype_general,
             )
 
-            error_cost += input_for_cost.T@self.R@input_for_cost"""
+            error_cost += input_for_cost.T@self.R@input_for_cost
 
             # Saturate in the case of NaN
             # state_next = jnp.where(jnp.isnan(state_next), 100, state_next)
@@ -798,7 +823,7 @@ class Sampling_MPC:
         optimize_swing,
     ):
         """
-        This function computes the control parameters by applying MPPI.
+        This function computes the control parameters by MPPI.
         """
 
         # Generate random parameters

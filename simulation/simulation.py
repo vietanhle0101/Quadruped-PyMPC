@@ -33,14 +33,24 @@ def run_simulation(
     ref_base_lin_vel=(0.0, 4.0),
     ref_base_ang_vel=(-0.4, 0.4),
     friction_coeff=(0.5, 1.0),
-    base_vel_command_type="human",
+    base_vel_command_type="human", 
+    goal_base_pos=None, # If ``goal_base_pos`` is provided, the function does not rely on keyboard arrows.
+    goal_kp=0.5,
+    goal_max_lin_vel=0.5,
+    goal_position_tolerance=0.1,
+    stop_at_goal=False,
     seed=0,
     render=True,
     recording_path: PathLike = None,
 ):
+    """
+    Run the Mujoco simulation with the PyMPC controller.
+    """
     np.set_printoptions(precision=3, suppress=True)
     np.random.seed(seed)
 
+    # Extract the robot- and scene-specific parameters once so the inner loop
+    # only deals with state updates and control.
     robot_name = qpympc_cfg.robot
     hip_height = qpympc_cfg.hip_height
     robot_leg_joints = qpympc_cfg.robot_leg_joints
@@ -48,10 +58,12 @@ def run_simulation(
     scene_name = qpympc_cfg.simulation_params["scene"]
     simulation_dt = qpympc_cfg.simulation_params["dt"]
 
-    # Save all observables available.
-    state_obs_names = [] #list(QuadrupedEnv.ALL_OBS)  # + list(IMU.ALL_OBS)
+    # Request only the observables that are needed externally. The controller
+    # pulls most of its inputs directly from the environment object.
+    state_obs_names = [] #list(QuadrupedEnv.ALL_OBS) # + list(IMU.ALL_OBS)
 
-    # Create the quadruped robot environment -----------------------------------------------------------
+    # Build the Mujoco environment. This wraps the robot model, terrain,
+    # simulator timing, and the command interface used by the controller.
     env = QuadrupedEnv(
         robot=robot_name,
         scene=scene_name,
@@ -62,7 +74,7 @@ def run_simulation(
         base_vel_command_type=base_vel_command_type,  # "forward", "random", "forward+rotate", "human"
         state_obs_names=tuple(state_obs_names),  # Desired quantities in the 'state' vec
     )
-    pprint(env.get_hyperparameters())
+    # pprint(env.get_hyperparameters())
     env.mjModel.opt.gravity[2] = -qpympc_cfg.gravity_constant
 
     # Some robots require a change in the zero joint-space configuration. If provided apply it
@@ -75,11 +87,11 @@ def run_simulation(
         env.viewer.user_scn.flags[mujoco.mjtRndFlag.mjRND_SHADOW] = False
         env.viewer.user_scn.flags[mujoco.mjtRndFlag.mjRND_REFLECTION] = False
 
-    # Initialization of variables used in the main control loop --------------------------------
+    # ---- Runtime buffers and visualization state ---------------------------------------------
 
-    # Torque vector
+    # Per-leg torque buffer reused across iterations.
     tau = LegsAttr(*[np.zeros((env.mjModel.nv, 1)) for _ in range(4)])
-    # Torque limits
+    # Soft actuator limits keep the commanded torques slightly below the hard bounds.
     tau_soft_limits_scalar = 0.9
     tau_limits = LegsAttr(
         FL=env.mjModel.actuator_ctrlrange[env.legs_tau_idx.FL] * tau_soft_limits_scalar,
@@ -88,9 +100,17 @@ def run_simulation(
         RR=env.mjModel.actuator_ctrlrange[env.legs_tau_idx.RR] * tau_soft_limits_scalar,
     )
 
-    # Feet positions and Legs order
+    # Keep a fixed leg ordering because the controller, visualizer, and logs all
+    # assume the same FL/FR/RL/RR convention.
     feet_traj_geom_ids, feet_GRF_geom_ids = None, LegsAttr(FL=-1, FR=-1, RL=-1, RR=-1)
     legs_order = ["FL", "FR", "RL", "RR"]
+    goal_geom_id = -1
+
+    # Accept both [x, y] and [x, y, z] goals. When only XY is provided, the
+    # current base height is reused so the command remains planar.
+    goal_base_pos = None if goal_base_pos is None else np.asarray(goal_base_pos, dtype=float)
+    if goal_base_pos is not None and goal_base_pos.shape not in {(2,), (3,)}:
+        raise ValueError("goal_base_pos must be a 2D or 3D position.")
 
     # Create HeightMap -----------------------------------------------------------------------
     if qpympc_cfg.simulation_params["visual_foothold_adaptation"] != "blind":
@@ -116,7 +136,7 @@ def run_simulation(
     else:
         heightmaps = None
 
-    # Quadruped PyMPC controller initialization -------------------------------------------------------------
+    # Define which controller-side quantities should be exposed for plotting and logging.
     quadrupedpympc_observables_names = (
         "ref_base_height",
         "ref_base_angles",
@@ -138,7 +158,8 @@ def run_simulation(
         quadrupedpympc_observables_names=quadrupedpympc_observables_names,
     )
 
-    # Data recording -------------------------------------------------------------------------------------------
+    # Optional trajectory logging to HDF5. This is outside the control path and
+    # only activated when the caller requests a recording directory.
     if recording_path is not None:
         from gym_quadruped.utils.data.h5py import H5Writer
 
@@ -159,17 +180,19 @@ def run_simulation(
     else:
         h5py_writer = None
 
-    # -----------------------------------------------------------------------------------------------------------
+    # ---- Episode and render scheduling -------------------------------------------------------
     RENDER_FREQ = 30  # Hz
     N_EPISODES = num_episodes
     N_STEPS_PER_EPISODE = int(num_seconds_per_episode // simulation_dt)
     last_render_time = time.time()
 
     state_obs_history, ctrl_state_history = [], []
+    goal_reached = False
+    terminated_early = False
     for episode_num in range(N_EPISODES):
         ep_state_history, ep_ctrl_state_history, ep_time = [], [], []
         for _ in tqdm(range(N_STEPS_PER_EPISODE), desc=f"Ep:{episode_num:d}-steps:", total=N_STEPS_PER_EPISODE):
-            # Update value from SE or Simulator ----------------------
+            # ---- Read the current simulator state ------------------------------------------------
             feet_pos = env.feet_pos(frame="world")
             feet_vel = env.feet_vel(frame='world')
             hip_pos = env.hip_positions(frame="world")
@@ -179,10 +202,34 @@ def run_simulation(
             base_pos = copy.deepcopy(env.base_pos)
             com_pos = copy.deepcopy(env.com)
 
-            # Get the reference base velocity in the world frame
-            ref_base_lin_vel, ref_base_ang_vel = env.target_base_vel()
+            # ---- Build the reference command -----------------------------------------------------
+            # The downstream controller expects velocity references. In goal mode we
+            # convert position error into a bounded planar velocity command.
+            if goal_base_pos is not None:
+                goal_position_world = goal_base_pos if goal_base_pos.shape == (3,) else np.array(
+                    [goal_base_pos[0], goal_base_pos[1], base_pos[2]],
+                    dtype=float,
+                )
+                position_error = goal_position_world - base_pos
+                position_error[2] = 0.0
+                distance_to_goal = np.linalg.norm(position_error[:2])
 
-            # Get the inertia matrix
+                if distance_to_goal <= goal_position_tolerance:
+                    # Inside the tolerance ball, command zero velocity so the robot settles.
+                    ref_base_lin_vel = np.zeros(3)
+                    ref_base_ang_vel = np.zeros(3)
+                else:
+                    # Simple proportional guidance with a speed cap.
+                    ref_base_lin_vel = goal_kp * position_error
+                    ref_base_lin_vel[2] = 0.0
+                    planar_speed = np.linalg.norm(ref_base_lin_vel[:2])
+                    if planar_speed > goal_max_lin_vel:
+                        ref_base_lin_vel[:2] *= goal_max_lin_vel / planar_speed
+                    ref_base_ang_vel = np.zeros(3)
+            else:
+                ref_base_lin_vel, ref_base_ang_vel = env.target_base_vel()
+
+            # ---- Gather dynamics terms required by the controller --------------------------------
             if qpympc_cfg.simulation_params["use_inertia_recomputation"]:
                 inertia = env.get_base_inertia().flatten()  # Reflected inertia of base at qpos, in world frame
             else:
@@ -204,7 +251,8 @@ def run_simulation(
             feet_jac = env.feet_jacobians(frame='world', return_rot_jac=False)
             feet_jac_dot = env.feet_jacobians_dot(frame='world', return_rot_jac=False)
 
-            # Quadruped PyMPC controller --------------------------------------------------------------
+            # ---- Solve the control problem -------------------------------------------------------
+            # The wrapper encapsulates gait generation, foothold planning, and MPC.
             tau = quadrupedpympc_wrapper.compute_actions(
                 com_pos,
                 base_pos,
@@ -234,26 +282,25 @@ def run_simulation(
                 inertia,
                 env.mjData.contact,
             )
-            # Limit tau between tau_limits
+            # Saturate the torques before sending them to Mujoco.
             for leg in ["FL", "FR", "RL", "RR"]:
                 tau_min, tau_max = tau_limits[leg][:, 0], tau_limits[leg][:, 1]
                 tau[leg] = np.clip(tau[leg], tau_min, tau_max)
 
-            # Set control and mujoco step -------------------------------------------------------------------------
+            # Convert the per-leg torques into the flat actuator vector expected by the env.
             action = np.zeros(env.mjModel.nu)
             action[env.legs_tau_idx.FL] = tau.FL
             action[env.legs_tau_idx.FR] = tau.FR
             action[env.legs_tau_idx.RL] = tau.RL
             action[env.legs_tau_idx.RR] = tau.RR
 
-
-            # Apply the action to the environment and evolve sim --------------------------------------------------
+            # Advance the simulation by one step using the newly computed torques.
             state, reward, is_terminated, is_truncated, info = env.step(action=action)
 
-            # Get Controller state observables
+            # Read back controller internals for plotting and optional recording.
             ctrl_state = quadrupedpympc_wrapper.get_obs()
 
-            # Store the history of observations and control -------------------------------------------------------
+            # Persist both raw env state and controller-side observables for this episode.
             base_poz_z_err = ctrl_state["ref_base_height"] - base_pos[2]
             ctrl_state["base_poz_z_err"] = base_poz_z_err
 
@@ -261,7 +308,7 @@ def run_simulation(
             ep_time.append(env.simulation_time)
             ep_ctrl_state_history.append(ctrl_state)
 
-            # Render only at a certain frequency -----------------------------------------------------------------
+            # ---- Visualization ------------------------------------------------------------------
             if render and (time.time() - last_render_time > 1.0 / RENDER_FREQ or env.step_num == 1):
                 _, _, feet_GRF = env.feet_contact_state(ground_reaction_forces=True)
 
@@ -312,29 +359,54 @@ def run_simulation(
                         geom_id=feet_GRF_geom_ids[leg_name],
                     )
 
+                if goal_base_pos is not None:
+                    # Draw the target point so goal-driven motion is visible in the viewer.
+                    goal_geom_id = render_sphere(
+                        viewer=env.viewer,
+                        position=goal_position_world,
+                        diameter=0.14,
+                        color=[1, 0, 0, 0.75],
+                        geom_id=goal_geom_id,
+                    )
+
                 env.render()
                 last_render_time = time.time()
 
-            # Reset the environment if the episode is terminated ------------------------------------------------
+            # ---- Stop or reset conditions -------------------------------------------------------
+            reached_goal = goal_base_pos is not None and distance_to_goal <= goal_position_tolerance
+            if stop_at_goal and reached_goal:
+                print(f"Goal reached at {base_pos[:2]}")
+                state_obs_history.append(ep_state_history)
+                ctrl_state_history.append(ep_ctrl_state_history)
+                goal_reached = True
+                break
+
             if env.step_num >= N_STEPS_PER_EPISODE or is_terminated or is_truncated:
                 if is_terminated:
                     print("Environment terminated")
+                    state_obs_history.append(ep_state_history)
+                    ctrl_state_history.append(ep_ctrl_state_history)
+                    terminated_early = True
+                    break
                 else:
                     state_obs_history.append(ep_state_history)
-                    ctrl_state_history.append(ep_ctrl_state_history)     
+                    ctrl_state_history.append(ep_ctrl_state_history)
 
                 env.reset(random=True)
                 quadrupedpympc_wrapper.reset(initial_feet_pos=env.feet_pos(frame="world"))
 
-        if h5py_writer is not None:  # Save episode trajectory data to disk.
+        # Flush the episode trajectory once the inner rollout loop finishes.
+        if h5py_writer is not None:
             ep_obs_history = collate_obs(ep_state_history)  # | collate_obs(ep_ctrl_state_history)
             ep_traj_time = np.asarray(ep_time)[:, np.newaxis]
             h5py_writer.append_trajectory(state_obs_traj=ep_obs_history, time=ep_traj_time)
 
+        if goal_reached or terminated_early:
+            break
+
     env.close()
     if h5py_writer is not None:
         return h5py_writer.file_path
-
 
 def collate_obs(list_of_dicts) -> dict[str, np.ndarray]:
     """Collates a list of dictionaries containing observation names and numpy arrays
@@ -356,10 +428,16 @@ if __name__ == "__main__":
     from quadruped_pympc import config as cfg
 
     qpympc_cfg = cfg
-    # Custom changes to the config here:
-    pass
+    # Custom changes to the config
+    goal_base_pos = np.array([3.0, 1.0, qpympc_cfg.simulation_params["ref_z"]])
 
     # Run the simulation with the desired configuration.....
-    run_simulation(qpympc_cfg=qpympc_cfg)
+    run_simulation(
+        qpympc_cfg=qpympc_cfg,
+        num_episodes=1,
+        base_vel_command_type="forward",
+        goal_base_pos=goal_base_pos,
+        stop_at_goal=True,
+    )
 
     # run_simulation(num_episodes=1, render=False)

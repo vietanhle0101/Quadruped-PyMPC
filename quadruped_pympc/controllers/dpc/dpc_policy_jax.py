@@ -1,21 +1,9 @@
 import jax
 import jax.numpy as jnp
+import flax.linen as nn
 
 
-def glorot_init(key, in_dim, out_dim):
-    """Glorot initializer for dense layers."""
-    limit = jnp.sqrt(6.0 / (in_dim + out_dim))
-    w_key, _ = jax.random.split(key)
-    weight = jax.random.uniform(w_key, (in_dim, out_dim), minval=-limit, maxval=limit)
-    bias = jnp.zeros((out_dim,))
-    return {"w": weight, "b": bias}
-
-
-def dense(params, x):
-    return x @ params["w"] + params["b"]
-
-
-class NeuralGRFPolicy:
+class NeuralGRFPolicy(nn.Module):
     """Simple MLP policy for DPC-style first-step GRF prediction.
 
     Input:
@@ -27,30 +15,12 @@ class NeuralGRFPolicy:
     - first-step GRFs for FL/FR/RL/RR     : 12
       ordered as [fx_FL, fy_FL, fz_FL, fx_FR, fy_FR, fz_FR, ...]
     """
-
-    def __init__(
-        self,
-        num_layers=2,
-        hidden_dim=256,
-        activation="gelu",
-        max_fx=150.0,
-        max_fy=150.0,
-        nominal_fz=80.0,
-    ):
-        self.input_dim = 24 + 24 + 4
-        self.output_dim = 12
-        self.hidden_dims = tuple([hidden_dim] * num_layers)
-        self.activation = activation
-        self.max_fx = max_fx
-        self.max_fy = max_fy
-        self.nominal_fz = nominal_fz
-
-    def init(self, key):
-        """Initialize all MLP parameters."""
-        dims = (self.input_dim,) + self.hidden_dims + (self.output_dim,)
-        keys = jax.random.split(key, len(dims) - 1)
-        layers = [glorot_init(layer_key, dims[i], dims[i + 1]) for i, layer_key in enumerate(keys)]
-        return {"layers": layers}
+    num_layers: int = 2
+    hidden_dim: int = 256
+    activation: str = "gelu"
+    max_fx: float = 150.0
+    max_fy: float = 150.0
+    nominal_fz: float = 80.0
 
     def pack_inputs(self, state, reference, current_contact):
         """Concatenate policy inputs into a single feature vector."""
@@ -63,17 +33,18 @@ class NeuralGRFPolicy:
             return jax.nn.gelu(x)
         return jnp.tanh(x)
 
-    def apply(self, params, state, reference, current_contact):
+    @nn.compact
+    def __call__(self, state, reference, current_contact):
         """Predict first-step GRFs from state, reference, and contact flags."""
         x = self.pack_inputs(state, reference, current_contact)
-        for layer in params["layers"][:-1]:
-            x = self._activation(dense(layer, x))
-        raw_output = dense(params["layers"][-1], x)
+        for _ in range(self.num_layers):
+            x = nn.Dense(self.hidden_dim)(x)
+            x = self._activation(x)
+        raw_output = nn.Dense(12)(x)
         return self.decode_action(raw_output, current_contact)
 
     def decode_action(self, raw_output, current_contact):
         """Map unconstrained network output to physically meaningful GRFs.
-
         Horizontal forces are bounded by tanh scaling.
         Vertical force is parameterized as positive via softplus.
         Swing-leg forces are masked out by the current contact vector.

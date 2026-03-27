@@ -1,3 +1,6 @@
+import pathlib
+
+import jax
 import numpy as np
 from gym_quadruped.utils.quadruped_utils import LegsAttr
 
@@ -81,6 +84,52 @@ class SRBDControllerInterface:
                 from quadruped_pympc.controllers.sampling.centroidal_nmpc_jax import Sampling_MPC
 
             self.controller = Sampling_MPC()
+        elif self.type == "dpc":
+            from quadruped_pympc.controllers.dpc.dpc_policy_jax import NeuralGRFPolicy
+            from quadruped_pympc.controllers.dpc.dpc_solver import DPC
+            from quadruped_pympc.controllers.dpc.dpc_trainer import DPC_Trainer
+
+            policy = NeuralGRFPolicy(
+                num_layers=int(cfg.mpc_params.get("dpc_num_layers", 5)),
+                hidden_dim=int(cfg.mpc_params.get("dpc_hidden_dim", 256)),
+                activation=str(cfg.mpc_params.get("dpc_activation", "gelu")),
+            )
+            self.controller = DPC(policy=policy, device=cfg.mpc_params.get("device", "gpu"))
+
+            checkpoint_path = cfg.mpc_params.get("dpc_policy_path")
+            if checkpoint_path is None:
+                raise ValueError("cfg.mpc_params['dpc_policy_path'] must be set when mpc_params['type'] == 'dpc'.")
+            checkpoint_path = pathlib.Path(checkpoint_path)
+            if not checkpoint_path.is_absolute():
+                checkpoint_path = pathlib.Path(__file__).resolve().parent.parent.parent / checkpoint_path
+
+            trainer = DPC_Trainer(self.controller)
+            checkpoint = trainer.load_trained_model(checkpoint_path)
+            self.dpc_params = jax.device_put(checkpoint["params"], self.controller.device)
+            self.best_sample_freq = self.step_freq_available[0] if len(self.step_freq_available) > 0 else 1.0
+
+    def _compute_dpc_control(self, state_current, ref_state, current_contact):
+        state_current_jax, reference_state_jax = self.controller.prepare_state_and_reference(
+            state_current,
+            ref_state,
+            current_contact,
+            self.previous_contact_mpc,
+        )
+        self.previous_contact_mpc = current_contact
+
+        nmpc_GRFs, nmpc_predicted_state = self.controller.runtime_inference_step(
+            self.dpc_params,
+            state_current_jax,
+            reference_state_jax,
+            current_contact,
+        )
+        nmpc_footholds = LegsAttr(
+            FL=ref_state["ref_foot_FL"][0],
+            FR=ref_state["ref_foot_FR"][0],
+            RL=ref_state["ref_foot_RL"][0],
+            RR=ref_state["ref_foot_RR"][0],
+        )
+        return np.asarray(nmpc_GRFs, dtype=np.float32), nmpc_footholds, nmpc_predicted_state
 
     def compute_control(
         self,
@@ -178,6 +227,17 @@ class SRBDControllerInterface:
             nmpc_joints_pos = None
             nmpc_joints_vel = None
             nmpc_joints_acc = None
+
+        elif self.type == "dpc":
+            nmpc_GRFs, nmpc_footholds, nmpc_predicted_state = self._compute_dpc_control(
+                state_current,
+                ref_state,
+                current_contact,
+            )
+            nmpc_joints_pos = None
+            nmpc_joints_vel = None
+            nmpc_joints_acc = None
+            best_sample_freq = pgg_step_freq
 
         # If we use Gradient-Based MPC
         else:

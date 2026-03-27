@@ -1,5 +1,8 @@
 # Description: This file contains the class for the NMPC controller
+import ctypes
+import os
 import pathlib
+import sys
 
 # Authors: Giulio Turrisi -
 
@@ -17,9 +20,62 @@ import quadruped_pympc.config as config
 from .centroidal_model_nominal import Centroidal_Model_Nominal
 
 
+def _configure_acados_runtime():
+    """Configure bundled acados paths so solver generation/loading is reproducible."""
+    acados_root = pathlib.Path(__file__).resolve().parents[3] / "acados"
+    acados_lib_dir = acados_root / "lib"
+
+    os.environ.setdefault("ACADOS_SOURCE_DIR", str(acados_root))
+
+    current_ld_library_path = os.environ.get("LD_LIBRARY_PATH", "")
+    ld_paths = [path for path in current_ld_library_path.split(":") if path]
+    if str(acados_lib_dir) not in ld_paths:
+        os.environ["LD_LIBRARY_PATH"] = ":".join([str(acados_lib_dir), *ld_paths])
+
+    candidate_library_dirs = [str(acados_lib_dir)]
+    for library_dir in (
+        pathlib.Path(sys.prefix) / "lib",
+        pathlib.Path("/home/ubuntu22/miniconda3/envs/quadruped_pympc_env/lib"),
+    ):
+        if (library_dir / "libblasfeo.so").exists():
+            candidate_library_dirs.append(str(library_dir))
+
+    current_library_path = os.environ.get("LIBRARY_PATH", "")
+    library_entries = [path for path in current_library_path.split(":") if path]
+    for library_dir in reversed(candidate_library_dirs):
+        if library_dir not in library_entries:
+            library_entries.insert(0, library_dir)
+    os.environ["LIBRARY_PATH"] = ":".join(library_entries)
+
+    candidate_include_dirs = []
+    for include_dir in (
+        pathlib.Path(sys.prefix) / "include",
+        pathlib.Path("/home/ubuntu22/miniconda3/envs/quadruped_pympc_env/include"),
+        acados_root / "external" / "blasfeo" / "include",
+    ):
+        if (include_dir / "blasfeo_target.h").exists():
+            candidate_include_dirs.append(str(include_dir))
+
+    current_cpath = os.environ.get("CPATH", "")
+    cpath_entries = [path for path in current_cpath.split(":") if path]
+    for include_dir in reversed(candidate_include_dirs):
+        if include_dir not in cpath_entries:
+            cpath_entries.insert(0, include_dir)
+    if cpath_entries:
+        os.environ["CPATH"] = ":".join(cpath_entries)
+
+    # Load shared libraries by absolute path so libacados can resolve libhpipm reliably.
+    for lib_name in ("libhpipm.so", "libacados.so"):
+        lib_path = acados_lib_dir / lib_name
+        if lib_path.exists():
+            ctypes.CDLL(str(lib_path), mode=ctypes.RTLD_GLOBAL)
+
+
 # Class for the Acados NMPC, the model is in another file!
 class Acados_NMPC_Nominal:
     def __init__(self):
+        _configure_acados_runtime()
+
         self.horizon = config.mpc_params['horizon']  # Define the number of discretization steps
         self.dt = config.mpc_params['dt']
         self.T_horizon = self.horizon * self.dt
@@ -84,7 +140,7 @@ class Acados_NMPC_Nominal:
         ny = nx + nu
 
         # Set dimensions
-        ocp.dims.N = self.horizon
+        ocp.solver_options.N_horizon = self.horizon
 
         # Set cost
         Q_mat, R_mat = self.set_weight(nx, nu)

@@ -6,6 +6,8 @@ by rolling out many simulated episodes and logging the data.
 
 import copy
 import argparse
+import contextlib
+import os
 import pathlib
 from datetime import datetime
 
@@ -15,10 +17,32 @@ from scipy.spatial.transform import Rotation
 from tqdm import tqdm
 
 from gym_quadruped.quadruped_env import QuadrupedEnv
+from gym_quadruped.utils.mujoco.visual import render_sphere
 from gym_quadruped.utils.quadruped_utils import LegsAttr
 
 from quadruped_pympc.controllers.dpc.dpc_solver import DPC
 from quadruped_pympc.quadruped_pympc_wrapper import QuadrupedPyMPC_Wrapper
+
+
+@contextlib.contextmanager
+def suppress_output(enabled: bool = True):
+    """Temporarily silence stdout/stderr, including subprocess/native output."""
+    if not enabled:
+        yield
+        return
+
+    with open(os.devnull, "w", encoding="utf-8") as devnull:
+        stdout_fd = os.dup(1)
+        stderr_fd = os.dup(2)
+        try:
+            os.dup2(devnull.fileno(), 1)
+            os.dup2(devnull.fileno(), 2)
+            yield
+        finally:
+            os.dup2(stdout_fd, 1)
+            os.dup2(stderr_fd, 2)
+            os.close(stdout_fd)
+            os.close(stderr_fd)
 
 
 def build_heightmaps(env, qpympc_cfg):
@@ -167,10 +191,10 @@ def pack_training_sample(dpc_solver, wrapper, current_contact):
         current_contact,
         current_contact,
     )
-    contact_sequence = np.asarray(wrapper.latest_contact_sequence, dtype=np.float32)
+    contact_sequence = np.asarray(wrapper.latest_contact_sequence, dtype=np.float32).T
     reference_trajectory = np.repeat(
         np.asarray(reference, dtype=np.float32)[None, :],
-        contact_sequence.shape[1],
+        contact_sequence.shape[0],
         axis=0,
     )
     return {
@@ -181,6 +205,26 @@ def pack_training_sample(dpc_solver, wrapper, current_contact):
     }
 
 
+def save_dataset(dataset, output_path: str | pathlib.Path):
+    """Persist the collected dataset to a compressed .npz file."""
+    output_path = pathlib.Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        output_path,
+        current_centroidal_state=np.stack(dataset["current_centroidal_state"], axis=0),
+        reference_state_horizon=np.stack(dataset["reference_state_horizon"], axis=0),
+        reference=np.stack(dataset["reference"], axis=0),
+        contact_sequence=np.stack(dataset["contact_sequence"], axis=0),
+        goal_base_pos=np.stack(dataset["goal_base_pos"], axis=0),
+        initial_base_pos=np.stack(dataset["initial_base_pos"], axis=0),
+        initial_base_rpy=np.stack(dataset["initial_base_rpy"], axis=0),
+        rollout_id=np.asarray(dataset["rollout_id"], dtype=np.int32),
+        time_index=np.asarray(dataset["time_index"], dtype=np.int32),
+        termination_code=np.asarray(dataset["termination_code"], dtype=np.int32),
+    )
+    return output_path
+
+
 def generate_dpc_dataset(
     qpympc_cfg,
     num_episodes=50,
@@ -188,6 +232,8 @@ def generate_dpc_dataset(
     render=False,
     seed=0,
     output_path: str | pathlib.Path = "datasets/dpc_dataset.npz",
+    autosave_every_episodes: int = 0,
+    quiet_startup: bool = True,
 ):
     """Generate DPC training data by rolling out the existing MPC controller.
 
@@ -196,6 +242,7 @@ def generate_dpc_dataset(
     - sample a random goal
     - run until the robot terminates, reaches the goal, or the safety timeout hits
     - log packed centroidal state, horizon reference, and contact sequence each step
+    - optionally autosave the dataset every N completed rollouts
     """
     rng = np.random.default_rng(seed)
 
@@ -230,13 +277,15 @@ def generate_dpc_dataset(
         RR=env.mjModel.actuator_ctrlrange[env.legs_tau_idx.RR] * tau_soft_limits_scalar,
     )
     legs_order = ["FL", "FR", "RL", "RR"]
+    goal_geom_id = -1
 
-    wrapper = QuadrupedPyMPC_Wrapper(
-        initial_feet_pos=env.feet_pos,
-        legs_order=tuple(legs_order),
-        feet_geom_id=env._feet_geom_id,
-    )
-    dpc_solver = DPC()
+    with suppress_output(quiet_startup):
+        wrapper = QuadrupedPyMPC_Wrapper(
+            initial_feet_pos=env.feet_pos,
+            legs_order=tuple(legs_order),
+            feet_geom_id=env._feet_geom_id,
+        )
+        dpc_solver = DPC()
 
     simulation_dt = qpympc_cfg.simulation_params["dt"]
     max_steps = int(num_seconds_per_rollout // simulation_dt)
@@ -372,6 +421,13 @@ def generate_dpc_dataset(
             _, _, is_terminated, is_truncated, _ = env.step(action=action)
 
             if render:
+                goal_geom_id = render_sphere(
+                    viewer=env.viewer,
+                    position=goal_base_pos,
+                    diameter=0.14,
+                    color=[1, 0, 0, 0.75],
+                    geom_id=goal_geom_id,
+                )
                 env.render()
 
             if is_terminated:
@@ -386,21 +442,13 @@ def generate_dpc_dataset(
 
         dataset["termination_code"].extend([termination_code] * num_logged_steps)
 
-    output_path = pathlib.Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(
-        output_path,
-        current_centroidal_state=np.stack(dataset["current_centroidal_state"], axis=0),
-        reference_state_horizon=np.stack(dataset["reference_state_horizon"], axis=0),
-        reference=np.stack(dataset["reference"], axis=0),
-        contact_sequence=np.stack(dataset["contact_sequence"], axis=0),
-        goal_base_pos=np.stack(dataset["goal_base_pos"], axis=0),
-        initial_base_pos=np.stack(dataset["initial_base_pos"], axis=0),
-        initial_base_rpy=np.stack(dataset["initial_base_rpy"], axis=0),
-        rollout_id=np.asarray(dataset["rollout_id"], dtype=np.int32),
-        time_index=np.asarray(dataset["time_index"], dtype=np.int32),
-        termination_code=np.asarray(dataset["termination_code"], dtype=np.int32),
-    )
+        if autosave_every_episodes > 0 and (rollout_id + 1) % autosave_every_episodes == 0:
+            save_dataset(dataset, output_path)
+            print(
+                f"Autosaved dataset after {rollout_id + 1} episodes to: {pathlib.Path(output_path)}"
+            )
+
+    output_path = save_dataset(dataset, output_path)
 
     env.close()
     print(f"Collected {len(dataset['current_centroidal_state'])} data samples.")
@@ -428,6 +476,17 @@ if __name__ == "__main__":
         default=default_output_path,
         help="Output .npz dataset path.",
     )
+    parser.add_argument(
+        "--autosave",
+        type=int,
+        default=100,
+        help="Autosave the dataset every N completed episodes",
+    )
+    parser.add_argument(
+        "--verbose-startup",
+        action="store_true",
+        help="Show acados/controller initialization logs at startup.",
+    )
     parser.add_argument("--render", action="store_true", help="Render the Mujoco rollout while collecting data.")
     args = parser.parse_args()
 
@@ -438,5 +497,7 @@ if __name__ == "__main__":
         render=args.render,
         seed=args.seed,
         output_path=args.output_path,
+        autosave_every_episodes=args.autosave_every_episodes,
+        quiet_startup=not args.verbose_startup,
     )
     print(f"Saved DPC dataset to: {dataset_path}")

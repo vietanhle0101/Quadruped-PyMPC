@@ -1,4 +1,5 @@
 # Description: This script is used to simulate the full model of the robot in mujoco
+import argparse
 import pathlib
 
 # Authors:
@@ -427,11 +428,14 @@ def collate_obs(list_of_dicts) -> dict[str, np.ndarray]:
 if __name__ == "__main__":
     from quadruped_pympc import config as cfg
 
-    qpympc_cfg = cfg
-    # Custom changes to the config
-    goal_base_pos = np.array([3.0, 1.0, qpympc_cfg.simulation_params["ref_z"]])
+    parser = argparse.ArgumentParser(description="Run the quadruped Mujoco simulation.")
+    parser.add_argument("--goal-x", type=float, default=1.0, help="Goal x position in world frame.")
+    parser.add_argument("--goal-y", type=float, default=3.0, help="Goal y position in world frame.")
+    args = parser.parse_args()
 
-    # Run the simulation with the desired configuration.....
+    qpympc_cfg = cfg
+    goal_base_pos = np.array([args.goal_x, args.goal_y, qpympc_cfg.simulation_params["ref_z"]])
+
     run_simulation(
         qpympc_cfg=qpympc_cfg,
         num_episodes=1,

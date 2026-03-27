@@ -73,19 +73,52 @@ class DPC:
 
         self.Q = self._default_state_cost_weight()
         self.R = self._default_control_cost_weight()
+        self._runtime_inference_step = self._build_runtime_inference_step()
+
+    def reset(self):
+        """Reset controller-side rollout state.
+
+        The current DPC policy is memoryless, so there is no internal control
+        state to clear here. This method exists to match the controller
+        interface expected by QuadrupedPyMPC_Wrapper.
+        """
+        return
+
+    def _build_runtime_inference_step(self):
+        """Build a cached single-step runtime inference function.
+
+        This keeps online control on a compiled path for policy inference and
+        one-step centroidal-state propagation.
+        """
+
+        def runtime_inference_step(params, state, reference, current_contact):
+            grfs = self.policy.apply({"params": params}, state, reference, current_contact)
+            grfs = self.project_grfs(grfs, current_contact)
+            input_vec = jnp.concatenate(
+                (jnp.zeros((12,), dtype=jnp.float32), grfs),
+                axis=0,
+            )
+            next_state = self.model.integrate_jax(state, input_vec, current_contact, 0)
+            return grfs, next_state
+
+        return jax.jit(runtime_inference_step)
 
     def _default_state_cost_weight(self):
         """State cost aligned with the sampling MPC default weighting."""
         Q = jnp.identity(self.state_dim, dtype=jnp.float32) * 0.0
-        Q = Q.at[2, 2].set(1500.0)
-        Q = Q.at[3, 3].set(200.0)
-        Q = Q.at[4, 4].set(200.0)
-        Q = Q.at[5, 5].set(200.0)
-        Q = Q.at[6, 6].set(500.0)
-        Q = Q.at[7, 7].set(500.0)
-        Q = Q.at[9, 9].set(20.0)
-        Q = Q.at[10, 10].set(20.0)
-        Q = Q.at[11, 11].set(50.0)
+
+        Q = Q.at[2, 2].set(3000.0)   # body height
+        Q = Q.at[3, 3].set(300.0)    # vx
+        Q = Q.at[4, 4].set(300.0)    # vy
+        Q = Q.at[5, 5].set(400.0)    # vz
+
+        Q = Q.at[6, 6].set(1200.0)   # roll
+        Q = Q.at[7, 7].set(1200.0)   # pitch
+        Q = Q.at[8, 8].set(50.0)     # yaw, still small
+
+        Q = Q.at[9, 9].set(120.0)    # roll rate
+        Q = Q.at[10, 10].set(120.0)  # pitch rate
+        Q = Q.at[11, 11].set(100.0)  # yaw rate
         return Q
 
     def _default_control_cost_weight(self):
@@ -226,7 +259,10 @@ class DPC:
 
     def init_policy_params(self, key):
         """Initialize neural policy parameters."""
-        return self.policy.init(key)
+        dummy_state = jnp.zeros((self.state_dim,), dtype=jnp.float32)
+        dummy_reference = jnp.zeros((self.reference_dim,), dtype=jnp.float32)
+        dummy_contact = jnp.ones((4,), dtype=jnp.float32)
+        return self.policy.init(key, dummy_state, dummy_reference, dummy_contact)["params"]
 
     def project_grfs(self, grfs, current_contact):
         """Project policy outputs into friction-constrained contact forces."""
@@ -240,8 +276,15 @@ class DPC:
 
     def predict_first_step_grfs(self, params, state, reference, current_contact):
         """Run the policy and return feasible first-step GRFs."""
-        grfs = self.policy.apply(params, state, reference, current_contact)
+        grfs = self.policy.apply({"params": params}, state, reference, current_contact)
         return self.project_grfs(grfs, current_contact)
+
+    def runtime_inference_step(self, params, state, reference, current_contact):
+        """Run cached jitted single-step inference for online control."""
+        state = jnp.asarray(state, dtype=jnp.float32)
+        reference = jnp.asarray(reference, dtype=jnp.float32)
+        current_contact = jnp.asarray(current_contact, dtype=jnp.float32)
+        return self._runtime_inference_step(params, state, reference, current_contact)
 
     def prepare_state_and_reference(self, state_current, reference_state, current_contact, previous_contact=None):
         """
@@ -362,7 +405,7 @@ class DPC:
             return running_cost + state_cost + control_cost, state_next
 
         cost, _ = jax.lax.fori_loop(0, self.horizon, iterate_fun, (cost, state))
-        return cost
+        return cost / jnp.float32(self.horizon)
 
     def loss(self, params, batch):
         """Compute mean rollout cost over a batch.

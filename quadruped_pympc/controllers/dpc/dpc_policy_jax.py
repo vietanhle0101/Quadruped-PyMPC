@@ -18,9 +18,9 @@ class NeuralGRFPolicy(nn.Module):
     num_layers: int = 2
     hidden_dim: int = 256
     activation: str = "gelu"
-    max_fx: float = 150.0
-    max_fy: float = 150.0
-    nominal_fz: float = 80.0
+    max_fx: float = 10.0
+    max_fy: float = 10.0
+    max_fz: float = 241.68897
 
     def pack_inputs(self, state, reference, current_contact):
         """Concatenate policy inputs into a single feature vector."""
@@ -46,14 +46,14 @@ class NeuralGRFPolicy(nn.Module):
     def decode_action(self, raw_output, current_contact):
         """Map unconstrained network output to physically meaningful GRFs.
         Horizontal forces are bounded by tanh scaling.
-        Vertical force is parameterized as positive via softplus.
+        Vertical force is bounded directly to [0, max_fz].
         Swing-leg forces are masked out by the current contact vector.
         """
         raw_output = raw_output.reshape(4, 3)
 
         fx = self.max_fx * jnp.tanh(raw_output[:, 0])
         fy = self.max_fy * jnp.tanh(raw_output[:, 1])
-        fz = jax.nn.softplus(raw_output[:, 2]) + self.nominal_fz
+        fz = self.max_fz * jax.nn.sigmoid(raw_output[:, 2])
 
         grfs = jnp.stack((fx, fy, fz), axis=1)
         grfs = grfs * current_contact[:, None]
@@ -77,6 +77,7 @@ def project_grfs_with_friction(grfs, current_contact, mu, fz_min, fz_max):
     fz = jnp.clip(fz, fz_min, fz_max)
     fx = jnp.clip(fx, -mu * fz, mu * fz)
     fy = jnp.clip(fy, -mu * fz, mu * fz)
+    # jax.debug.print("fx={fx}\nfy={fy}\nfz={fz}", fx=fx, fy=fy, fz=fz)
 
     projected = jnp.stack((fx, fy, fz), axis=1)
     projected = projected * current_contact[:, None]

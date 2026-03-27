@@ -26,6 +26,18 @@ from quadruped_pympc.helpers.quadruped_utils import plot_swing_mujoco
 from quadruped_pympc.quadruped_pympc_wrapper import QuadrupedPyMPC_Wrapper
 
 
+def print_controller_config(qpympc_cfg):
+    """Print the active controller configuration for quick consistency checks."""
+    print("Active controller configuration:")
+    print(f"  robot: {qpympc_cfg.robot}")
+    print(f"  mass: {qpympc_cfg.mass if hasattr(qpympc_cfg, 'mass') else 'n/a'}")
+    print(f"  gravity_constant: {qpympc_cfg.gravity_constant}")
+    print(f"  simulation_dt: {qpympc_cfg.simulation_params['dt']}")
+    print(f"  mpc_frequency: {qpympc_cfg.simulation_params['mpc_frequency']}")
+    print("  mpc_params:")
+    pprint(qpympc_cfg.mpc_params, sort_dicts=False)
+
+
 def run_simulation(
     qpympc_cfg,
     process=0,
@@ -37,7 +49,7 @@ def run_simulation(
     base_vel_command_type="human", 
     goal_base_pos=None, # If ``goal_base_pos`` is provided, the function does not rely on keyboard arrows.
     goal_kp=0.5,
-    goal_max_lin_vel=0.5,
+    goal_max_lin_vel=0.2,
     goal_position_tolerance=0.1,
     stop_at_goal=False,
     seed=0,
@@ -241,7 +253,12 @@ def run_simulation(
             # Idx of the leg
             legs_qvel_idx = env.legs_qvel_idx  # leg_name: [idx1, idx2, idx3] ...
             legs_qpos_idx = env.legs_qpos_idx  # leg_name: [idx1, idx2, idx3] ...
-            joints_pos = LegsAttr(FL=legs_qvel_idx.FL, FR=legs_qvel_idx.FR, RL=legs_qvel_idx.RL, RR=legs_qvel_idx.RR)
+            joints_pos = LegsAttr(
+                FL=qpos[legs_qpos_idx.FL].copy(),
+                FR=qpos[legs_qpos_idx.FR].copy(),
+                RL=qpos[legs_qpos_idx.RL].copy(),
+                RR=qpos[legs_qpos_idx.RR].copy(),
+            )
 
             # Get Centrifugal, Coriolis, Gravity, Friction for the swing controller
             legs_mass_matrix = env.legs_mass_matrix
@@ -365,7 +382,7 @@ def run_simulation(
                     goal_geom_id = render_sphere(
                         viewer=env.viewer,
                         position=goal_position_world,
-                        diameter=0.14,
+                        diameter=0.15,
                         color=[1, 0, 0, 0.75],
                         geom_id=goal_geom_id,
                     )
@@ -430,10 +447,11 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Run the quadruped Mujoco simulation.")
     parser.add_argument("--goal-x", type=float, default=1.0, help="Goal x position in world frame.")
-    parser.add_argument("--goal-y", type=float, default=3.0, help="Goal y position in world frame.")
+    parser.add_argument("--goal-y", type=float, default=0.0, help="Goal y position in world frame.")
     args = parser.parse_args()
 
     qpympc_cfg = cfg
+    # print_controller_config(qpympc_cfg)
     goal_base_pos = np.array([args.goal_x, args.goal_y, qpympc_cfg.simulation_params["ref_z"]])
 
     run_simulation(

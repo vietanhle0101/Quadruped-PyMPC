@@ -228,7 +228,7 @@ simulation_params = {
 
     # the MPC will be called every 1/(mpc_frequency*dt) timesteps
     # this helps to evaluate more realistically the performance of the controller
-    'mpc_frequency':               100,
+    'mpc_frequency':               50,
 
     'use_inertia_recomputation':   True,
 

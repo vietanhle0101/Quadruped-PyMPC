@@ -223,10 +223,10 @@ class SRBDControllerInterface:
                 RR=ref_state["ref_foot_RR"][0],
             )
             nmpc_GRFs = np.array(nmpc_GRFs)
-
             nmpc_joints_pos = None
             nmpc_joints_vel = None
             nmpc_joints_acc = None
+            # print(nmpc_GRFs)
 
         elif self.type == "dpc":
             nmpc_GRFs, nmpc_footholds, nmpc_predicted_state = self._compute_dpc_control(
@@ -238,6 +238,7 @@ class SRBDControllerInterface:
             nmpc_joints_vel = None
             nmpc_joints_acc = None
             best_sample_freq = pgg_step_freq
+            # print(nmpc_GRFs)
 
         # If we use Gradient-Based MPC
         else:

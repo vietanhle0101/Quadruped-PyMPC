@@ -25,7 +25,6 @@ def load_config(config_path: pathlib.Path):
     with open(config_path, "r", encoding="utf-8") as file:
         return yaml.safe_load(file)
 
-
 def normalize_policy_config(policy_config: dict):
     normalized = dict(policy_config)
     if "num_layers" in normalized and normalized["num_layers"] is not None:
@@ -35,7 +34,6 @@ def normalize_policy_config(policy_config: dict):
     if "activation" in normalized and normalized["activation"] is not None:
         normalized["activation"] = str(normalized["activation"])
     return normalized
-
 
 def configure_dpc_controller(policy_file_path: pathlib.Path, policy_config: dict, device: str):
     cfg.mpc_params["type"] = "dpc"
@@ -53,13 +51,13 @@ def run_dpc_test(
     process=0,
     num_episodes=1,
     num_seconds_per_episode=20,
-    ref_base_lin_vel=(0.0, 0.4),
-    ref_base_ang_vel=(0.0, 0.0),
+    ref_base_lin_vel=(0.0, 4.0),
+    ref_base_ang_vel=(-0.4, 0.4),
     friction_coeff=(0.5, 1.0),
     base_vel_command_type="forward",
     goal_base_pos=None,
     goal_kp=0.5,
-    goal_max_lin_vel=0.5,
+    goal_max_lin_vel=0.2,
     goal_position_tolerance=0.1,
     seed=0,
     render=True,

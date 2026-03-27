@@ -33,16 +33,10 @@ class DPC:
 
         self.control_parametrization = cfg.mpc_params["control_parametrization"]
 
-        # These are not optimizer variables in DPC, but they are still useful
-        # as output scales for the neural policy.
-        self.max_sampling_forces_x = 10
-        self.max_sampling_forces_y = 10
-        self.max_sampling_forces_z = 30
-
         if self.control_parametrization in ("linear_spline", "cubic_spline"):
             self.num_spline = cfg.mpc_params["num_splines"]
 
-        # ---- Select the JAX execution device ------------------------------------------------
+        # Select the JAX execution device 
         if self.device_name == "gpu":
             try:
                 self.device = jax.devices("gpu")[0]
@@ -54,11 +48,7 @@ class DPC:
 
         # Neural policy            
         if policy is None:
-            self.policy = NeuralGRFPolicy(
-                max_fx=self.max_sampling_forces_x,
-                max_fy=self.max_sampling_forces_y,
-                nominal_fz=self.max_sampling_forces_z,
-            )
+            self.policy = NeuralGRFPolicy()
         else:
             self.policy = policy
 
@@ -70,7 +60,6 @@ class DPC:
         self.mu = cfg.mpc_params["mu"]
         self.f_z_min = cfg.mpc_params["grf_min"]
         self.f_z_max = cfg.mpc_params["grf_max"]
-
         self.Q = self._default_state_cost_weight()
         self.R = self._default_control_cost_weight()
         self._runtime_inference_step = self._build_runtime_inference_step()
@@ -107,18 +96,18 @@ class DPC:
         """State cost aligned with the sampling MPC default weighting."""
         Q = jnp.identity(self.state_dim, dtype=jnp.float32) * 0.0
 
-        Q = Q.at[2, 2].set(3000.0)   # body height
-        Q = Q.at[3, 3].set(300.0)    # vx
-        Q = Q.at[4, 4].set(300.0)    # vy
-        Q = Q.at[5, 5].set(400.0)    # vz
+        Q = Q.at[2, 2].set(1500.0)   # body height
+        Q = Q.at[3, 3].set(200.0)    # vx
+        Q = Q.at[4, 4].set(200.0)    # vy
+        Q = Q.at[5, 5].set(200.0)    # vz
 
-        Q = Q.at[6, 6].set(1200.0)   # roll
-        Q = Q.at[7, 7].set(1200.0)   # pitch
-        Q = Q.at[8, 8].set(50.0)     # yaw, still small
+        Q = Q.at[6, 6].set(500.0)   # roll
+        Q = Q.at[7, 7].set(500.0)   # pitch
+        Q = Q.at[8, 8].set(0.0)     # yaw, still small
 
-        Q = Q.at[9, 9].set(120.0)    # roll rate
-        Q = Q.at[10, 10].set(120.0)  # pitch rate
-        Q = Q.at[11, 11].set(100.0)  # yaw rate
+        Q = Q.at[9, 9].set(20.0)    # roll rate
+        Q = Q.at[10, 10].set(20.0)  # pitch rate
+        Q = Q.at[11, 11].set(50.0)  # yaw rate
         return Q
 
     def _default_control_cost_weight(self):

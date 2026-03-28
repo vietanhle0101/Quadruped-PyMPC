@@ -1,4 +1,4 @@
-dataset_path: datasets/dpc_dataset_1M.npz
+dataset_path: datasets/dpc_dataset_3M.npz
 device: gpu
 policy:
   num_layers: 5

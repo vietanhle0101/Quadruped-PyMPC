@@ -34,6 +34,7 @@ from quadruped_pympc import config as cfg
 from quadruped_pympc.helpers.quadruped_utils import plot_swing_mujoco
 from quadruped_pympc.quadruped_pympc_wrapper import QuadrupedPyMPC_Wrapper
 
+
 def load_config(config_path: pathlib.Path):
     with open(config_path, "r", encoding="utf-8") as file:
         return yaml.safe_load(file)
@@ -47,6 +48,7 @@ def resolve_repo_path(path: pathlib.Path):
         return candidate
     return CURRENT_DIR / path
 
+
 def normalize_policy_config(policy_config: dict):
     normalized = dict(policy_config)
     if "num_layers" in normalized and normalized["num_layers"] is not None:
@@ -57,16 +59,27 @@ def normalize_policy_config(policy_config: dict):
         normalized["activation"] = str(normalized["activation"])
     return normalized
 
-def configure_dpc_controller(policy_file_path: pathlib.Path, policy_config: dict, device: str):
-    cfg.mpc_params["type"] = "dpc"
+
+def configure_dmppi_controller(
+    policy_file_path: pathlib.Path,
+    policy_config: dict,
+    device: str,
+    dmppi_num_samples: int,
+    dmppi_temperature: float,
+    dmppi_noise_std: float,
+):
+    cfg.mpc_params["type"] = "dmppi"
     cfg.mpc_params["device"] = device
     cfg.mpc_params["dpc_policy_path"] = str(policy_file_path)
     cfg.mpc_params["dpc_num_layers"] = policy_config.get("num_layers", 5)
     cfg.mpc_params["dpc_hidden_dim"] = policy_config.get("hidden_dim", 256)
     cfg.mpc_params["dpc_activation"] = policy_config.get("activation", "gelu")
+    cfg.mpc_params["dmppi_num_samples"] = int(dmppi_num_samples)
+    cfg.mpc_params["dmppi_temperature"] = float(dmppi_temperature)
+    cfg.mpc_params["dmppi_noise_std"] = float(dmppi_noise_std)
 
 
-def run_dpc_test(
+def run_dmppi_test(
     policy_file_path,
     policy_config,
     qpympc_cfg,
@@ -84,10 +97,20 @@ def run_dpc_test(
     seed=0,
     render=True,
     device="gpu",
+    dmppi_num_samples=64,
+    dmppi_temperature=1.0,
+    dmppi_noise_std=10.0,
 ):
     del process
     np.random.seed(seed)
-    configure_dpc_controller(policy_file_path, policy_config, device)
+    configure_dmppi_controller(
+        policy_file_path,
+        policy_config,
+        device,
+        dmppi_num_samples,
+        dmppi_temperature,
+        dmppi_noise_std,
+    )
 
     print(f"Loaded policy checkpoint: {policy_file_path}")
     print(
@@ -97,7 +120,7 @@ def run_dpc_test(
         f"activation='{policy_config.get('activation', 'gelu')}')"
     )
     print(f"Controller mode: {cfg.mpc_params['type']}")
-    print(f"DPC device preference: {cfg.mpc_params['device']}")
+    print(f"DMPPI device preference: {cfg.mpc_params['device']}")
 
     robot_name = qpympc_cfg.robot
     hip_height = qpympc_cfg.hip_height
@@ -327,10 +350,10 @@ def run_dpc_test(
 def main():
     default_policy_file = REPO_ROOT / "training" / "policy_files" / "dpc_constrained_policy.pkl"
     default_config_path = REPO_ROOT / "training" / "dpc_config.yaml"
-    parser = argparse.ArgumentParser(description="Test a trained DPC policy through QuadrupedPyMPC_Wrapper.")
+    parser = argparse.ArgumentParser(description="Test a trained DMPPI policy through QuadrupedPyMPC_Wrapper.")
     parser.add_argument("--policy_file", type=pathlib.Path, default=default_policy_file, help="Path to the trained DPC checkpoint.")
     parser.add_argument("--config", type=pathlib.Path, default=default_config_path, help="Path to the YAML config used to define the policy architecture.")
-    parser.add_argument("--device", type=str, default="gpu", choices=("cpu", "gpu"), help="JAX device preference for the DPC policy.")
+    parser.add_argument("--device", type=str, default="gpu", choices=("cpu", "gpu"), help="JAX device preference for the DMPPI policy.")
     parser.add_argument("--seed", type=int, default=0, help="Random seed.")
     parser.add_argument("--goal-x", type=float, default=3.0, help="Goal x position in world frame.")
     parser.add_argument("--goal-y", type=float, default=0.0, help="Goal y position in world frame.")
@@ -340,6 +363,9 @@ def main():
         default=0.1,
         help="Maximum planar linear velocity command used when driving toward the goal.",
     )
+    parser.add_argument("--dmppi-num-samples", type=int, default=64, help="Number of one-step DMPPI force samples.")
+    parser.add_argument("--dmppi-temperature", type=float, default=1.0, help="Softmax temperature for DMPPI weighting.")
+    parser.add_argument("--dmppi-noise-std", type=float, default=5.0, help="Gaussian sample std around the NN force proposal.")
     parser.add_argument("--no-render", action="store_true", help="Disable Mujoco rendering.")
     args = parser.parse_args()
 
@@ -350,7 +376,7 @@ def main():
     policy_config = normalize_policy_config(dict(config.get("policy", {})))
     goal_base_pos = np.array([args.goal_x, args.goal_y, cfg.simulation_params["ref_z"]], dtype=float)
 
-    run_dpc_test(
+    run_dmppi_test(
         policy_file_path=policy_file_path,
         policy_config=policy_config,
         qpympc_cfg=cfg,
@@ -359,6 +385,9 @@ def main():
         seed=args.seed,
         render=not args.no_render,
         device=args.device,
+        dmppi_num_samples=args.dmppi_num_samples,
+        dmppi_temperature=args.dmppi_temperature,
+        dmppi_noise_std=args.dmppi_noise_std,
     )
 
 

@@ -76,7 +76,7 @@ mpc_params = {
     # 'collaborative' optimized directly the GRF and has a passive arm model inside
     # 'lyapunov' optimized directly the GRF and has a Lyapunov-based stability constraint
     # 'kinodynamic' sbrd with joints - experimental
-    'type':                                    'sampling',
+    'type':                                    'nominal',
 
     # print the mpc info
     'verbose':                                 False,

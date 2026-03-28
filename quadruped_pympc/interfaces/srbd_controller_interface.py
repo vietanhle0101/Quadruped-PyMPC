@@ -103,14 +103,20 @@ class SRBDControllerInterface:
                 from quadruped_pympc.controllers.sampling.centroidal_nmpc_jax import Sampling_MPC
 
             self.controller = Sampling_MPC()
-        elif self.type == "dpc":
+        elif self.type in {"dpc", "dmppi"}:
             from quadruped_pympc.controllers.dpc.dpc_policy_jax import NeuralGRFPolicy
-            from quadruped_pympc.controllers.dpc.dpc_solver import DPC
             from quadruped_pympc.controllers.dpc.dpc_trainer import DPC_Trainer
+            if self.type == "dmppi":
+                from quadruped_pympc.controllers.dpc.dmppi_solver import DMPPI
+            else:
+                from quadruped_pympc.controllers.dpc.dpc_solver import DPC
 
             checkpoint_path = cfg.mpc_params.get("dpc_policy_path")
             if checkpoint_path is None:
-                raise ValueError("cfg.mpc_params['dpc_policy_path'] must be set when mpc_params['type'] == 'dpc'.")
+                raise ValueError(
+                    "cfg.mpc_params['dpc_policy_path'] must be set when "
+                    "mpc_params['type'] is 'dpc' or 'dmppi'."
+                )
             checkpoint_path = pathlib.Path(checkpoint_path)
             if not checkpoint_path.is_absolute():
                 checkpoint_path = pathlib.Path(__file__).resolve().parent.parent.parent / checkpoint_path
@@ -121,7 +127,16 @@ class SRBDControllerInterface:
                 hidden_dim=inferred_hidden_dim,
                 activation=str(cfg.mpc_params.get("dpc_activation", "gelu")),
             )
-            self.controller = DPC(policy=policy, device=cfg.mpc_params.get("device", "gpu"))
+            if self.type == "dmppi":
+                self.controller = DMPPI(
+                    policy=policy,
+                    device=cfg.mpc_params.get("device", "gpu"),
+                    num_dmppi_samples=cfg.mpc_params.get("dmppi_num_samples", 64),
+                    dmppi_temperature=cfg.mpc_params.get("dmppi_temperature", 1.0),
+                    dmppi_noise_std=cfg.mpc_params.get("dmppi_noise_std", 5.0),
+                )
+            else:
+                self.controller = DPC(policy=policy, device=cfg.mpc_params.get("device", "gpu"))
 
             trainer = DPC_Trainer(self.controller)
             checkpoint = trainer.load_trained_model(checkpoint_path)
@@ -248,7 +263,7 @@ class SRBDControllerInterface:
             nmpc_joints_vel = None
             nmpc_joints_acc = None
 
-        elif self.type == "dpc":
+        elif self.type in {"dpc", "dmppi"}:
             nmpc_GRFs, nmpc_footholds, nmpc_predicted_state = self._compute_dpc_control(
                 state_current,
                 ref_state,

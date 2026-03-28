@@ -163,7 +163,6 @@ class DPC:
         R = R.at[23, 23].set(0.001)
         return R
 
-
     def init_policy_params(self, key):
         """Initialize neural policy parameters."""
         dummy_state = jnp.zeros((self.state_dim,), dtype=jnp.float32)

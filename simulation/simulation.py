@@ -48,8 +48,8 @@ def run_simulation(
     friction_coeff=(0.5, 1.0),
     base_vel_command_type="human", 
     goal_base_pos=None, # If ``goal_base_pos`` is provided, the function does not rely on keyboard arrows.
-    goal_kp=0.5,
-    goal_max_lin_vel=0.2,
+    goal_kp=2.0,
+    goal_max_lin_vel=1.0,
     goal_position_tolerance=0.1,
     stop_at_goal=False,
     seed=0,

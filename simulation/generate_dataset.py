@@ -229,17 +229,14 @@ def generate_dpc_dataset(
     qpympc_cfg,
     num_episodes=50,
     num_seconds_per_rollout=10.0,
-    ref_base_lin_vel=(0.0, 2.0),
-    ref_base_ang_vel=(-0.4, 0.4),
-    friction_coeff=(0.5, 1.0),
-    base_vel_command_type="human",
-    goal_kp=0.5,
-    goal_max_lin_vel=0.2,
-    goal_position_tolerance=0.1,
     render=False,
     seed=0,
+    ref_base_lin_vel: tuple[float, float] = (0.0, 2.0),
+    goal_kp: float = 2.0,
+    goal_max_lin_vel: float = 1.0,
+    goal_position_tolerance: float = 0.1,
     output_path: str | pathlib.Path = "datasets/dpc_dataset.npz",
-    autosave: int = 0,
+    autosave_every_episodes: int = 0,
     quiet_startup: bool = True,
 ):
     """Generate DPC training data by rolling out the existing MPC controller.
@@ -252,15 +249,16 @@ def generate_dpc_dataset(
     - optionally autosave the dataset every N completed rollouts
     """
     rng = np.random.default_rng(seed)
+    hip_height = qpympc_cfg.hip_height
 
     env = QuadrupedEnv(
         robot=qpympc_cfg.robot,
         scene=qpympc_cfg.simulation_params["scene"],
         sim_dt=qpympc_cfg.simulation_params["dt"],
-        ref_base_lin_vel=np.asarray(ref_base_lin_vel) * qpympc_cfg.hip_height,
-        ref_base_ang_vel=ref_base_ang_vel,
-        ground_friction_coeff=friction_coeff,
-        base_vel_command_type=base_vel_command_type,
+        ref_base_lin_vel=np.asarray(ref_base_lin_vel) * hip_height,
+        ref_base_ang_vel=(0.0, 0.0),
+        ground_friction_coeff=(0.5, 1.0),
+        base_vel_command_type="forward",
         state_obs_names=tuple(),
     )
     env.mjModel.opt.gravity[2] = -qpympc_cfg.gravity_constant
@@ -449,7 +447,7 @@ def generate_dpc_dataset(
 
         dataset["termination_code"].extend([termination_code] * num_logged_steps)
 
-        if autosave > 0 and (rollout_id + 1) % autosave == 0:
+        if autosave_every_episodes > 0 and (rollout_id + 1) % autosave_every_episodes == 0:
             save_dataset(dataset, output_path)
             print(
                 f"Autosaved dataset after {rollout_id + 1} episodes to: {pathlib.Path(output_path)}"
@@ -473,22 +471,40 @@ if __name__ == "__main__":
     parser.add_argument(
         "--num-seconds-per-rollout",
         type=float,
-        default=50.0,
+        default=10.0,
         help="Maximum simulated seconds per rollout.",
+    )
+    parser.add_argument("--seed", type=int, default=0, help="Random seed for dataset generation.")
+    parser.add_argument(
+        "--ref-base-lin-vel-min",
+        type=float,
+        default=0.0,
+        help="Minimum linear velocity reference passed to QuadrupedEnv before hip-height scaling.",
+    )
+    parser.add_argument(
+        "--ref-base-lin-vel-max",
+        type=float,
+        default=2.0,
+        help="Maximum linear velocity reference passed to QuadrupedEnv before hip-height scaling.",
+    )
+    parser.add_argument(
+        "--goal-kp",
+        type=float,
+        default=2.0,
+        help="Proportional gain used to convert goal position error into a velocity reference.",
     )
     parser.add_argument(
         "--goal-max-lin-vel",
         type=float,
-        default=0.2,
-        help="Maximum planar speed used for goal tracking.",
+        default=1.0,
+        help="Maximum planar linear velocity command used during dataset rollouts.",
     )
     parser.add_argument(
         "--goal-position-tolerance",
         type=float,
         default=0.1,
-        help="Goal tolerance in meters.",
+        help="Goal tolerance radius used to stop commanding motion during dataset rollouts.",
     )
-    parser.add_argument("--seed", type=int, default=0, help="Random seed for dataset generation.")
     parser.add_argument(
         "--output-path",
         type=pathlib.Path,
@@ -515,10 +531,12 @@ if __name__ == "__main__":
         num_seconds_per_rollout=args.num_seconds_per_rollout,
         render=args.render,
         seed=args.seed,
+        ref_base_lin_vel=(args.ref_base_lin_vel_min, args.ref_base_lin_vel_max),
+        goal_kp=args.goal_kp,
         goal_max_lin_vel=args.goal_max_lin_vel,
         goal_position_tolerance=args.goal_position_tolerance,
         output_path=args.output_path,
-        autosave=args.autosave,
+        autosave_every_episodes=args.autosave,
         quiet_startup=not args.verbose_startup,
     )
     print(f"Saved DPC dataset to: {dataset_path}")

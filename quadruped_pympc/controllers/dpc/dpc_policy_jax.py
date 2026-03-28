@@ -58,27 +58,3 @@ class NeuralGRFPolicy(nn.Module):
         grfs = jnp.stack((fx, fy, fz), axis=1)
         grfs = grfs * current_contact[:, None]
         return grfs.reshape(12,)
-
-
-def project_grfs_with_friction(grfs, current_contact, mu, fz_min, fz_max):
-    """Project predicted GRFs into a friction-cone-feasible set.
-
-    This mirrors the same physical constraints used by the sampling MPC:
-    - unilateral contact in z
-    - vertical force bounds
-    - friction cone bounds for x/y
-    """
-    grfs = grfs.reshape(4, 3)
-
-    fx = grfs[:, 0]
-    fy = grfs[:, 1]
-    fz = grfs[:, 2]
-
-    fz = jnp.clip(fz, fz_min, fz_max)
-    fx = jnp.clip(fx, -mu * fz, mu * fz)
-    fy = jnp.clip(fy, -mu * fz, mu * fz)
-    # jax.debug.print("fx={fx}\nfy={fy}\nfz={fz}", fx=fx, fy=fy, fz=fz)
-
-    projected = jnp.stack((fx, fy, fz), axis=1)
-    projected = projected * current_contact[:, None]
-    return projected.reshape(12,)

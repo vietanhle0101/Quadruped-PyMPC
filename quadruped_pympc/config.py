@@ -176,9 +176,9 @@ mpc_params = {
 
     # this is used only in the case 'sampling'.
     'sampling_method':                         'mppi',  # 'random_sampling', 'mppi', 'cem_mppi'
-    'control_parametrization':                 'cubic_spline', # 'cubic_spline', 'linear_spline', 'zero_order'
+    'control_parametrization':                 'zero_order', # 'cubic_spline', 'linear_spline', 'zero_order'
     'num_splines':                             2,  # number of splines to use for the control parametrization
-    'num_parallel_computations':               4096,  # More is better, but slower computation!
+    'num_parallel_computations':               8192,  # More is better, but slower computation!
     'num_sampling_iterations':                 2,  # More is better, but slower computation!
     'device':                                  'gpu',  # 'gpu', 'cpu'
     # convariances for the sampling methods

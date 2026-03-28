@@ -1,10 +1,29 @@
 import pathlib
+import pickle
 
 import jax
 import numpy as np
 from gym_quadruped.utils.quadruped_utils import LegsAttr
 
 from quadruped_pympc import config as cfg
+
+
+def _infer_dpc_policy_architecture(checkpoint_path: pathlib.Path):
+    """Infer MLP depth and width from a saved Flax checkpoint."""
+    with open(checkpoint_path, "rb") as file:
+        checkpoint = pickle.load(file)
+
+    params = checkpoint["params"]
+    dense_keys = sorted(
+        [key for key in params.keys() if key.startswith("Dense_")],
+        key=lambda name: int(name.split("_")[1]),
+    )
+    if len(dense_keys) < 2:
+        raise ValueError(f"Unable to infer DPC architecture from checkpoint: {checkpoint_path}")
+
+    hidden_dim = int(params[dense_keys[0]]["kernel"].shape[1])
+    num_layers = len(dense_keys) - 1
+    return num_layers, hidden_dim
 
 
 class SRBDControllerInterface:
@@ -89,19 +108,20 @@ class SRBDControllerInterface:
             from quadruped_pympc.controllers.dpc.dpc_solver import DPC
             from quadruped_pympc.controllers.dpc.dpc_trainer import DPC_Trainer
 
-            policy = NeuralGRFPolicy(
-                num_layers=int(cfg.mpc_params.get("dpc_num_layers", 5)),
-                hidden_dim=int(cfg.mpc_params.get("dpc_hidden_dim", 256)),
-                activation=str(cfg.mpc_params.get("dpc_activation", "gelu")),
-            )
-            self.controller = DPC(policy=policy, device=cfg.mpc_params.get("device", "gpu"))
-
             checkpoint_path = cfg.mpc_params.get("dpc_policy_path")
             if checkpoint_path is None:
                 raise ValueError("cfg.mpc_params['dpc_policy_path'] must be set when mpc_params['type'] == 'dpc'.")
             checkpoint_path = pathlib.Path(checkpoint_path)
             if not checkpoint_path.is_absolute():
                 checkpoint_path = pathlib.Path(__file__).resolve().parent.parent.parent / checkpoint_path
+
+            inferred_num_layers, inferred_hidden_dim = _infer_dpc_policy_architecture(checkpoint_path)
+            policy = NeuralGRFPolicy(
+                num_layers=inferred_num_layers,
+                hidden_dim=inferred_hidden_dim,
+                activation=str(cfg.mpc_params.get("dpc_activation", "gelu")),
+            )
+            self.controller = DPC(policy=policy, device=cfg.mpc_params.get("device", "gpu"))
 
             trainer = DPC_Trainer(self.controller)
             checkpoint = trainer.load_trained_model(checkpoint_path)
@@ -223,10 +243,10 @@ class SRBDControllerInterface:
                 RR=ref_state["ref_foot_RR"][0],
             )
             nmpc_GRFs = np.array(nmpc_GRFs)
+
             nmpc_joints_pos = None
             nmpc_joints_vel = None
             nmpc_joints_acc = None
-            # print(nmpc_GRFs)
 
         elif self.type == "dpc":
             nmpc_GRFs, nmpc_footholds, nmpc_predicted_state = self._compute_dpc_control(
@@ -238,7 +258,6 @@ class SRBDControllerInterface:
             nmpc_joints_vel = None
             nmpc_joints_acc = None
             best_sample_freq = pgg_step_freq
-            # print(nmpc_GRFs)
 
         # If we use Gradient-Based MPC
         else:

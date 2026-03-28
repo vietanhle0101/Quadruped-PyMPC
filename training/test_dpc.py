@@ -1,8 +1,22 @@
 import argparse
 import copy
+import os
 import pathlib
 import sys
 import time
+
+
+def _requested_device_from_argv(argv):
+    for idx, arg in enumerate(argv):
+        if arg.startswith("--device="):
+            return arg.split("=", 1)[1].lower()
+        if arg == "--device" and idx + 1 < len(argv):
+            return argv[idx + 1].lower()
+    return "cpu"
+
+
+if _requested_device_from_argv(sys.argv[1:]) == "cpu":
+    os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 import mujoco
 import numpy as np
@@ -12,14 +26,13 @@ from gym_quadruped.utils.mujoco.visual import render_sphere, render_vector
 from gym_quadruped.utils.quadruped_utils import LegsAttr
 from tqdm import tqdm
 
-REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+CURRENT_DIR = pathlib.Path(__file__).resolve().parent
+if str(CURRENT_DIR) not in sys.path:
+    sys.path.insert(0, str(CURRENT_DIR))
 
 from quadruped_pympc import config as cfg
 from quadruped_pympc.helpers.quadruped_utils import plot_swing_mujoco
 from quadruped_pympc.quadruped_pympc_wrapper import QuadrupedPyMPC_Wrapper
-
 
 def load_config(config_path: pathlib.Path):
     with open(config_path, "r", encoding="utf-8") as file:
@@ -57,11 +70,11 @@ def run_dpc_test(
     base_vel_command_type="forward",
     goal_base_pos=None,
     goal_kp=0.5,
-    goal_max_lin_vel=0.2,
+    goal_max_lin_vel=0.3,
     goal_position_tolerance=0.1,
     seed=0,
     render=True,
-    device="gpu",
+    device="cpu",
 ):
     del process
     np.random.seed(seed)
@@ -303,12 +316,12 @@ def run_dpc_test(
 
 
 def main():
-    default_policy_file = REPO_ROOT / "training" / "policy_files" / "dpc_constrained_policy.pkl"
-    default_config_path = REPO_ROOT / "training" / "dpc_config.yaml"
+    default_policy_file = CURRENT_DIR / "training" / "policy_files" / "dpc_constrained_policy.pkl"
+    default_config_path = CURRENT_DIR / "training" / "dpc_config.yaml"
     parser = argparse.ArgumentParser(description="Test a trained DPC policy through QuadrupedPyMPC_Wrapper.")
     parser.add_argument("--policy_file", type=pathlib.Path, default=default_policy_file, help="Path to the trained DPC checkpoint.")
     parser.add_argument("--config", type=pathlib.Path, default=default_config_path, help="Path to the YAML config used to define the policy architecture.")
-    parser.add_argument("--device", type=str, default="gpu", choices=("cpu", "gpu"), help="JAX device preference for the DPC policy.")
+    parser.add_argument("--device", type=str, default="cpu", choices=("cpu", "gpu"), help="JAX device preference for the DPC policy.")
     parser.add_argument("--num-episodes", type=int, default=1, help="Number of episodes to simulate.")
     parser.add_argument("--num-seconds-per-episode", type=float, default=20.0, help="Episode length in seconds.")
     parser.add_argument("--seed", type=int, default=0, help="Random seed.")
@@ -319,10 +332,10 @@ def main():
 
     policy_file_path = args.policy_file
     if not policy_file_path.is_absolute():
-        policy_file_path = REPO_ROOT / policy_file_path
+        policy_file_path = CURRENT_DIR / policy_file_path
     config_path = args.config
     if not config_path.is_absolute():
-        config_path = REPO_ROOT / config_path
+        config_path = CURRENT_DIR / config_path
 
     config = load_config(config_path)
     policy_config = normalize_policy_config(dict(config.get("policy", {})))

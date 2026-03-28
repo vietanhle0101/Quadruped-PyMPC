@@ -5,7 +5,8 @@ import sys
 import jax
 import yaml
 
-REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
+CURRENT_DIR = pathlib.Path(__file__).resolve().parent
+REPO_ROOT = CURRENT_DIR.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
@@ -19,12 +20,16 @@ def load_config(config_path: pathlib.Path):
         return yaml.safe_load(file)
 
 
-def resolve_repo_path(path_value: str | None):
+def resolve_repo_path(path_value: str | None, base_dir: pathlib.Path | None = None):
     if path_value is None:
         return None
     path = pathlib.Path(path_value)
     if path.is_absolute():
         return path
+    if base_dir is not None:
+        config_relative = base_dir / path
+        if config_relative.exists():
+            return config_relative
     return REPO_ROOT / path
 
 
@@ -93,16 +98,17 @@ def main():
     )
     args = parser.parse_args()
 
-    config = load_config(args.config)
+    config_path = args.config.resolve()
+    config = load_config(config_path)
     train_params = normalize_train_params(dict(config.get("train_params", {})))
     policy_config = normalize_policy_config(dict(config.get("policy", {})))
 
-    dataset_path = resolve_repo_path(config.get("dataset_path"))
+    dataset_path = resolve_repo_path(config.get("dataset_path"), base_dir=config_path.parent)
     if dataset_path is None:
         raise ValueError("dataset_path is missing from the config file.")
     device = str(config.get("device", "gpu"))
 
-    save_path = resolve_repo_path(train_params.get("save_path"))
+    save_path = resolve_repo_path(train_params.get("save_path"), base_dir=config_path.parent)
     if save_path is not None:
         train_params["save_path"] = str(save_path)
 
@@ -129,7 +135,7 @@ def main():
         f"hidden_dim={policy.hidden_dim}, activation='{policy.activation}')"
     )
 
-    retrain_path = resolve_repo_path(str(args.retrain)) if args.retrain is not None else None
+    retrain_path = resolve_repo_path(str(args.retrain), base_dir=config_path.parent) if args.retrain is not None else None
     if retrain_path is not None:
         resume = trainer.load_trained_model(retrain_path, training_params=train_params)
         print(f"Loaded checkpoint for retraining: {retrain_path}")

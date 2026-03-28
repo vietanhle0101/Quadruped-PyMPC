@@ -2,8 +2,31 @@ import jax
 import jax.numpy as jnp
 
 from quadruped_pympc import config as cfg
-from quadruped_pympc.controllers.dpc.dpc_policy_jax import NeuralGRFPolicy, project_grfs_with_friction
+from quadruped_pympc.controllers.dpc.dpc_policy_jax import NeuralGRFPolicy
 from quadruped_pympc.controllers.sampling.centroidal_model_jax import Centroidal_Model_JAX
+
+def project_grfs_with_friction(grfs, current_contact, mu, fz_min, fz_max):
+    """Project predicted GRFs into a friction-cone-feasible set.
+
+    This mirrors the same physical constraints used by the sampling MPC:
+    - unilateral contact in z
+    - vertical force bounds
+    - friction cone bounds for x/y
+    """
+    grfs = grfs.reshape(4, 3)
+
+    fx = grfs[:, 0]
+    fy = grfs[:, 1]
+    fz = grfs[:, 2]
+
+    fz = jnp.clip(fz, fz_min, fz_max)
+    fx = jnp.clip(fx, -mu * fz, mu * fz)
+    fy = jnp.clip(fy, -mu * fz, mu * fz)
+    # jax.debug.print("fx={fx}\nfy={fy}\nfz={fz}", fx=fx, fy=fy, fz=fz)
+
+    projected = jnp.stack((fx, fy, fz), axis=1)
+    projected = projected * current_contact[:, None]
+    return projected.reshape(12,)
 
 
 class DPC:
@@ -140,111 +163,6 @@ class DPC:
         R = R.at[23, 23].set(0.001)
         return R
 
-    def compute_linear_spline(self, parameters, step, horizon_leg):
-        """Linear-spline copied from Sampling_MPC."""
-        chunk_boundaries = jnp.linspace(0, self.horizon, self.num_spline + 1)
-        index = jnp.max(jnp.where(step >= chunk_boundaries, jnp.arange(self.num_spline + 1), 0))
-
-        tau = step / (horizon_leg / self.num_spline)
-        tau = tau - 1 * index
-        q = (tau - 0.0) / (1.0 - 0.0)
-
-        shift = self.num_spline + 1
-        f_x = (1 - q) * parameters[index + 0] + q * parameters[index + 1]
-        f_y = (1 - q) * parameters[index + shift] + q * parameters[index + shift + 1]
-        f_z = (1 - q) * parameters[index + shift * 2] + q * parameters[index + shift * 2 + 1]
-        return f_x, f_y, f_z
-
-    def compute_cubic_spline(self, parameters, step, horizon_leg):
-        """Cubic-spline copied from Sampling_MPC."""
-        chunk_boundaries = jnp.linspace(0, self.horizon, self.num_spline + 1)
-        index = jnp.max(jnp.where(step >= chunk_boundaries, jnp.arange(self.num_spline + 1), 0))
-
-        tau = step / (horizon_leg / self.num_spline)
-        tau = tau - 1 * index
-        q = (tau - 0.0) / (1.0 - 0.0)
-
-        start_index = 10 * index
-        a = 2 * q * q * q - 3 * q * q + 1
-        b = (q * q * q - 2 * q * q + q) * 1.0
-        c = -2 * q * q * q + 3 * q * q
-        d = (q * q * q - q * q) * 1.0
-
-        phi = 0.5 * (
-            ((parameters[start_index + 2] - parameters[start_index + 1]) / 1.0)
-            + ((parameters[start_index + 1] - parameters[start_index + 0]) / 1.0)
-        )
-        phi_next = 0.5 * (
-            ((parameters[start_index + 3] - parameters[start_index + 2]) / 1.0)
-            + ((parameters[start_index + 2] - parameters[start_index + 1]) / 1.0)
-        )
-        f_x = a * parameters[start_index + 1] + b * phi + c * parameters[start_index + 2] + d * phi_next
-
-        phi = 0.5 * (
-            ((parameters[start_index + 6] - parameters[start_index + 5]) / 1.0)
-            + ((parameters[start_index + 5] - parameters[start_index + 4]) / 1.0)
-        )
-        phi_next = 0.5 * (
-            ((parameters[start_index + 7] - parameters[start_index + 6]) / 1.0)
-            + ((parameters[start_index + 6] - parameters[start_index + 5]) / 1.0)
-        )
-        f_y = a * parameters[start_index + 5] + b * phi + c * parameters[start_index + 6] + d * phi_next
-
-        phi = 0.5 * (
-            ((parameters[start_index + 10] - parameters[start_index + 9]) / 1.0)
-            + ((parameters[start_index + 9] - parameters[start_index + 8]) / 1.0)
-        )
-        phi_next = 0.5 * (
-            ((parameters[start_index + 11] - parameters[start_index + 10]) / 1.0)
-            + ((parameters[start_index + 10] - parameters[start_index + 9]) / 1.0)
-        )
-        f_z = a * parameters[start_index + 9] + b * phi + c * parameters[start_index + 10] + d * phi_next
-        return f_x, f_y, f_z
-
-    def compute_zero_order_spline(self, parameters, step, horizon_leg):
-        """Zero-order-hold copied from Sampling_MPC."""
-        del horizon_leg
-        index = jnp.int16(step)
-        f_x = parameters[index]
-        f_y = parameters[index + self.horizon]
-        f_z = parameters[index + self.horizon * 2]
-        return f_x, f_y, f_z
-
-    def enforce_force_constraints(
-        self, f_x_FL, f_y_FL, f_z_FL, f_x_FR, f_y_FR, f_z_FR, f_x_RL, f_y_RL, f_z_RL, f_x_RR, f_y_RR, f_z_RR
-    ):
-        """Sampling_MPC contact-force projection utility."""
-        f_z_FL = jnp.where(f_z_FL > self.f_z_min, f_z_FL, self.f_z_min)
-        f_z_FR = jnp.where(f_z_FR > self.f_z_min, f_z_FR, self.f_z_min)
-        f_z_RL = jnp.where(f_z_RL > self.f_z_min, f_z_RL, self.f_z_min)
-        f_z_RR = jnp.where(f_z_RR > self.f_z_min, f_z_RR, self.f_z_min)
-
-        f_z_FL = jnp.where(f_z_FL < self.f_z_max, f_z_FL, self.f_z_max)
-        f_z_FR = jnp.where(f_z_FR < self.f_z_max, f_z_FR, self.f_z_max)
-        f_z_RL = jnp.where(f_z_RL < self.f_z_max, f_z_RL, self.f_z_max)
-        f_z_RR = jnp.where(f_z_RR < self.f_z_max, f_z_RR, self.f_z_max)
-
-        f_x_FL = jnp.where(f_x_FL > -self.mu * f_z_FL, f_x_FL, -self.mu * f_z_FL)
-        f_x_FL = jnp.where(f_x_FL < self.mu * f_z_FL, f_x_FL, self.mu * f_z_FL)
-        f_y_FL = jnp.where(f_y_FL > -self.mu * f_z_FL, f_y_FL, -self.mu * f_z_FL)
-        f_y_FL = jnp.where(f_y_FL < self.mu * f_z_FL, f_y_FL, self.mu * f_z_FL)
-
-        f_x_FR = jnp.where(f_x_FR > -self.mu * f_z_FR, f_x_FR, -self.mu * f_z_FR)
-        f_x_FR = jnp.where(f_x_FR < self.mu * f_z_FR, f_x_FR, self.mu * f_z_FR)
-        f_y_FR = jnp.where(f_y_FR > -self.mu * f_z_FR, f_y_FR, -self.mu * f_z_FR)
-        f_y_FR = jnp.where(f_y_FR < self.mu * f_z_FR, f_y_FR, self.mu * f_z_FR)
-
-        f_x_RL = jnp.where(f_x_RL > -self.mu * f_z_RL, f_x_RL, -self.mu * f_z_RL)
-        f_x_RL = jnp.where(f_x_RL < self.mu * f_z_RL, f_x_RL, self.mu * f_z_RL)
-        f_y_RL = jnp.where(f_y_RL > -self.mu * f_z_RL, f_y_RL, -self.mu * f_z_RL)
-        f_y_RL = jnp.where(f_y_RL < self.mu * f_z_RL, f_y_RL, self.mu * f_z_RL)
-
-        f_x_RR = jnp.where(f_x_RR > -self.mu * f_z_RR, f_x_RR, -self.mu * f_z_RR)
-        f_x_RR = jnp.where(f_x_RR < self.mu * f_z_RR, f_x_RR, self.mu * f_z_RR)
-        f_y_RR = jnp.where(f_y_RR > -self.mu * f_z_RR, f_y_RR, -self.mu * f_z_RR)
-        f_y_RR = jnp.where(f_y_RR < self.mu * f_z_RR, f_y_RR, self.mu * f_z_RR)
-
-        return f_x_FL, f_y_FL, f_z_FL, f_x_FR, f_y_FR, f_z_FR, f_x_RL, f_y_RL, f_z_RL, f_x_RR, f_y_RR, f_z_RR
 
     def init_policy_params(self, key):
         """Initialize neural policy parameters."""
@@ -397,25 +315,8 @@ class DPC:
         return cost / jnp.float32(self.horizon)
 
     def loss(self, params, batch):
-        """Compute mean rollout cost over a batch.
-
-        Supported batch formats:
-
-        1. Packed tensors:
-           {
-               "initial_state": (B, 24),
-               "reference": (B, 24),
-               "contact_sequence": (B, 4, H),
-           }
-
-        2. SRBD-style dictionaries:
-           {
-               "state_current": sequence[dict],
-               "reference_state": sequence[dict],
-               "current_contact": (B, 4),
-               "previous_contact": (B, 4),  # optional
-               "contact_sequence": (B, 4, H),
-           }
+        """
+        Compute mean rollout cost over a batch.
         """
         if {"initial_state", "reference", "contact_sequence"}.issubset(batch.keys()):
             initial_state = jnp.asarray(batch["initial_state"])

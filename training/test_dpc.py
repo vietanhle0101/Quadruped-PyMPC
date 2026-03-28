@@ -63,18 +63,18 @@ def run_dpc_test(
     qpympc_cfg,
     process=0,
     num_episodes=1,
-    num_seconds_per_episode=20,
-    ref_base_lin_vel=(0.0, 4.0),
+    num_seconds_per_episode=30,
+    ref_base_lin_vel=(0.0, 2.0),
     ref_base_ang_vel=(-0.4, 0.4),
     friction_coeff=(0.5, 1.0),
     base_vel_command_type="forward",
     goal_base_pos=None,
     goal_kp=0.5,
-    goal_max_lin_vel=0.3,
+    goal_max_lin_vel=0.2,
     goal_position_tolerance=0.1,
     seed=0,
     render=True,
-    device="cpu",
+    device="gpu",
 ):
     del process
     np.random.seed(seed)
@@ -289,7 +289,7 @@ def run_dpc_test(
                     goal_geom_id = render_sphere(
                         viewer=env.viewer,
                         position=goal_position_world,
-                        diameter=0.14,
+                        diameter=0.18,
                         color=[1, 0, 0, 0.75],
                         geom_id=goal_geom_id,
                     )
@@ -321,12 +321,16 @@ def main():
     parser = argparse.ArgumentParser(description="Test a trained DPC policy through QuadrupedPyMPC_Wrapper.")
     parser.add_argument("--policy_file", type=pathlib.Path, default=default_policy_file, help="Path to the trained DPC checkpoint.")
     parser.add_argument("--config", type=pathlib.Path, default=default_config_path, help="Path to the YAML config used to define the policy architecture.")
-    parser.add_argument("--device", type=str, default="cpu", choices=("cpu", "gpu"), help="JAX device preference for the DPC policy.")
-    parser.add_argument("--num-episodes", type=int, default=1, help="Number of episodes to simulate.")
-    parser.add_argument("--num-seconds-per-episode", type=float, default=20.0, help="Episode length in seconds.")
+    parser.add_argument("--device", type=str, default="gpu", choices=("cpu", "gpu"), help="JAX device preference for the DPC policy.")
     parser.add_argument("--seed", type=int, default=0, help="Random seed.")
     parser.add_argument("--goal-x", type=float, default=3.0, help="Goal x position in world frame.")
     parser.add_argument("--goal-y", type=float, default=0.0, help="Goal y position in world frame.")
+    parser.add_argument(
+        "--goal-max-lin-vel",
+        type=float,
+        default=0.1,
+        help="Maximum planar linear velocity command used when driving toward the goal.",
+    )
     parser.add_argument("--no-render", action="store_true", help="Disable Mujoco rendering.")
     args = parser.parse_args()
 
@@ -345,9 +349,8 @@ def main():
         policy_file_path=policy_file_path,
         policy_config=policy_config,
         qpympc_cfg=cfg,
-        num_episodes=args.num_episodes,
-        num_seconds_per_episode=args.num_seconds_per_episode,
         goal_base_pos=goal_base_pos,
+        goal_max_lin_vel=args.goal_max_lin_vel,
         seed=args.seed,
         render=not args.no_render,
         device=args.device,

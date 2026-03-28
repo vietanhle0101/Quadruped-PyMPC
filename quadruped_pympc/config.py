@@ -175,17 +175,17 @@ mpc_params = {
     # ----- START properties only for the sampling-based mpc -----
 
     # this is used only in the case 'sampling'.
-    'sampling_method':                         'mppi',  # 'random_sampling', 'mppi', 'cem_mppi'
+    'sampling_method':                         'random_sampling',  # 'random_sampling', 'mppi', 'cem_mppi'
     'control_parametrization':                 'zero_order', # 'cubic_spline', 'linear_spline', 'zero_order'
     'num_splines':                             2,  # number of splines to use for the control parametrization
-    'num_parallel_computations':               8192,  # More is better, but slower computation!
+    'num_parallel_computations':               10000,  # More is better, but slower computation!
     'num_sampling_iterations':                 2,  # More is better, but slower computation!
     'device':                                  'gpu',  # 'gpu', 'cpu'
     # convariances for the sampling methods
     'sigma_cem_mppi':                          3,
     'sigma_mppi':                              3,
     'sigma_random_sampling':                   [0.2, 3, 10],
-    'shift_solution':                          True,
+    'shift_solution':                          False,
 
     # ----- END properties for the sampling-based mpc -----
     }
@@ -228,7 +228,7 @@ simulation_params = {
 
     # the MPC will be called every 1/(mpc_frequency*dt) timesteps
     # this helps to evaluate more realistically the performance of the controller
-    'mpc_frequency':               50,
+    'mpc_frequency':               100,
 
     'use_inertia_recomputation':   True,
 

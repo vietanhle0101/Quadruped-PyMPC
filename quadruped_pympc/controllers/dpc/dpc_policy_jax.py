@@ -18,8 +18,9 @@ class NeuralGRFPolicy(nn.Module):
     num_layers: int = 2
     hidden_dim: int = 256
     activation: str = "gelu"
-    max_fx: float = 10.0
-    max_fy: float = 10.0
+    # hard code those things for now
+    max_fx: float = 30.0 
+    max_fy: float = 30.0
     max_fz: float = 241.68897
 
     def pack_inputs(self, state, reference, current_contact):

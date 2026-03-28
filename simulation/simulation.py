@@ -42,8 +42,8 @@ def run_simulation(
     qpympc_cfg,
     process=0,
     num_episodes=500,
-    num_seconds_per_episode=60,
-    ref_base_lin_vel=(0.0, 4.0),
+    num_seconds_per_episode=30,
+    ref_base_lin_vel=(0.0, 2.0),
     ref_base_ang_vel=(-0.4, 0.4),
     friction_coeff=(0.5, 1.0),
     base_vel_command_type="human", 
@@ -448,6 +448,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run the quadruped Mujoco simulation.")
     parser.add_argument("--goal-x", type=float, default=1.0, help="Goal x position in world frame.")
     parser.add_argument("--goal-y", type=float, default=0.0, help="Goal y position in world frame.")
+    parser.add_argument(
+        "--goal-max-lin-vel",
+        type=float,
+        default=0.1,
+        help="Maximum planar linear velocity command used when driving toward the goal.",
+    )
     args = parser.parse_args()
 
     qpympc_cfg = cfg
@@ -459,6 +465,7 @@ if __name__ == "__main__":
         num_episodes=1,
         base_vel_command_type="forward",
         goal_base_pos=goal_base_pos,
+        goal_max_lin_vel=args.goal_max_lin_vel,
         stop_at_goal=True,
     )
 

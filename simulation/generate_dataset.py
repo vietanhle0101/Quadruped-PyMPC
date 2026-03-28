@@ -424,7 +424,7 @@ def generate_dpc_dataset(
                 goal_geom_id = render_sphere(
                     viewer=env.viewer,
                     position=goal_base_pos,
-                    diameter=0.14,
+                    diameter=0.18,
                     color=[1, 0, 0, 0.75],
                     geom_id=goal_geom_id,
                 )

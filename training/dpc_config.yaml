@@ -1,4 +1,4 @@
-dataset_path: datasets/dpc_dataset_1M.npz
+dataset_path: datasets/dpc_dataset_3M.npz
 device: gpu
 policy:
   num_layers: 5
@@ -10,7 +10,7 @@ train_params:
   num_epochs: 100
   steps_per_epoch: 500
   batch_size: 512
-  lr: 1e-4
+  lr: 1e-3
   weight_decay: 1e-5
   grad_clip: 1.0
   log_every: 250

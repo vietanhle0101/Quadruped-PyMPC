@@ -231,6 +231,9 @@ def generate_dpc_dataset(
     num_seconds_per_rollout=10.0,
     render=False,
     seed=0,
+    goal_kp: float = 2.0,
+    goal_max_lin_vel: float = 1.0,
+    goal_position_tolerance: float = 0.1,
     output_path: str | pathlib.Path = "datasets/dpc_dataset.npz",
     autosave_every_episodes: int = 0,
     quiet_startup: bool = True,
@@ -325,15 +328,15 @@ def generate_dpc_dataset(
             position_error = goal_base_pos - base_pos
             position_error[2] = 0.0
             distance_to_goal = np.linalg.norm(position_error[:2])
-            if distance_to_goal <= 0.1:
+            if distance_to_goal <= goal_position_tolerance:
                 ref_base_lin_vel = np.zeros(3)
                 ref_base_ang_vel = np.zeros(3)
             else:
-                ref_base_lin_vel = 0.5 * position_error
+                ref_base_lin_vel = goal_kp * position_error
                 ref_base_lin_vel[2] = 0.0
                 planar_speed = np.linalg.norm(ref_base_lin_vel[:2])
-                if planar_speed > 0.5:
-                    ref_base_lin_vel[:2] *= 0.5 / planar_speed
+                if planar_speed > goal_max_lin_vel:
+                    ref_base_lin_vel[:2] *= goal_max_lin_vel / planar_speed
                 ref_base_ang_vel = np.zeros(3)
 
             if qpympc_cfg.simulation_params["use_inertia_recomputation"]:
@@ -433,7 +436,7 @@ def generate_dpc_dataset(
             if is_terminated:
                 termination_code = 1
                 break
-            if distance_to_goal <= 0.1:
+            if distance_to_goal <= goal_position_tolerance:
                 termination_code = 0
                 break
             if is_truncated:
@@ -471,6 +474,24 @@ if __name__ == "__main__":
     )
     parser.add_argument("--seed", type=int, default=0, help="Random seed for dataset generation.")
     parser.add_argument(
+        "--goal-kp",
+        type=float,
+        default=2.0,
+        help="Proportional gain used to convert goal position error into a velocity reference.",
+    )
+    parser.add_argument(
+        "--goal-max-lin-vel",
+        type=float,
+        default=1.0,
+        help="Maximum planar linear velocity command used during dataset rollouts.",
+    )
+    parser.add_argument(
+        "--goal-position-tolerance",
+        type=float,
+        default=0.1,
+        help="Goal tolerance radius used to stop commanding motion during dataset rollouts.",
+    )
+    parser.add_argument(
         "--output-path",
         type=pathlib.Path,
         default=default_output_path,
@@ -496,8 +517,11 @@ if __name__ == "__main__":
         num_seconds_per_rollout=args.num_seconds_per_rollout,
         render=args.render,
         seed=args.seed,
+        goal_kp=args.goal_kp,
+        goal_max_lin_vel=args.goal_max_lin_vel,
+        goal_position_tolerance=args.goal_position_tolerance,
         output_path=args.output_path,
-        autosave_every_episodes=args.autosave_every_episodes,
+        autosave_every_episodes=args.autosave,
         quiet_startup=not args.verbose_startup,
     )
     print(f"Saved DPC dataset to: {dataset_path}")

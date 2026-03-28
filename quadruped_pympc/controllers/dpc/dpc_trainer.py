@@ -10,7 +10,7 @@ from quadruped_pympc.controllers.dpc.dpc_solver import DPC
 
 
 class DPC_Trainer:
-    """Training scaffold for differentiable predictive control policies."""
+    """Training for differentiable predictive control policies."""
 
     def __init__(self, dpc_solver: DPC):
         self.dpc_solver = dpc_solver
@@ -303,8 +303,6 @@ class DPC_Trainer:
 
         for epoch in range(start_epoch + 1, num_epochs + 1):
             loss_sum = 0.0
-            track_sum = 0.0
-            pen_sum = 0.0
 
             for iteration in range(1, steps_per_epoch + 1):
                 batch_key = jax.random.PRNGKey(seed + epoch * steps_per_epoch + iteration)

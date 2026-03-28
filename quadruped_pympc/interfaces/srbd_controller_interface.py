@@ -104,7 +104,10 @@ class SRBDControllerInterface:
 
             self.controller = Sampling_MPC()
         elif self.type in {"dpc", "dmppi"}:
-            from quadruped_pympc.controllers.dpc.dpc_policy_jax import NeuralGRFPolicy
+            from quadruped_pympc.controllers.dpc.dpc_policy_jax import (
+                NeuralGRFDistributionPolicy,
+                NeuralGRFPolicy,
+            )
             from quadruped_pympc.controllers.dpc.dpc_trainer import DPC_Trainer
             if self.type == "dmppi":
                 from quadruped_pympc.controllers.dpc.dmppi_solver import DMPPI
@@ -122,20 +125,24 @@ class SRBDControllerInterface:
                 checkpoint_path = pathlib.Path(__file__).resolve().parent.parent.parent / checkpoint_path
 
             inferred_num_layers, inferred_hidden_dim = _infer_dpc_policy_architecture(checkpoint_path)
-            policy = NeuralGRFPolicy(
-                num_layers=inferred_num_layers,
-                hidden_dim=inferred_hidden_dim,
-                activation=str(cfg.mpc_params.get("dpc_activation", "gelu")),
-            )
             if self.type == "dmppi":
+                policy = NeuralGRFDistributionPolicy(
+                    num_layers=inferred_num_layers,
+                    hidden_dim=inferred_hidden_dim,
+                    activation=str(cfg.mpc_params.get("dpc_activation", "gelu")),
+                )
                 self.controller = DMPPI(
                     policy=policy,
                     device=cfg.mpc_params.get("device", "gpu"),
                     num_dmppi_samples=cfg.mpc_params.get("dmppi_num_samples", 64),
                     dmppi_temperature=cfg.mpc_params.get("dmppi_temperature", 1.0),
-                    dmppi_noise_std=cfg.mpc_params.get("dmppi_noise_std", 5.0),
                 )
             else:
+                policy = NeuralGRFPolicy(
+                    num_layers=inferred_num_layers,
+                    hidden_dim=inferred_hidden_dim,
+                    activation=str(cfg.mpc_params.get("dpc_activation", "gelu")),
+                )
                 self.controller = DPC(policy=policy, device=cfg.mpc_params.get("device", "gpu"))
 
             trainer = DPC_Trainer(self.controller)

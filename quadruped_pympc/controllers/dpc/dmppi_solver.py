@@ -1,7 +1,9 @@
 import jax
 import jax.numpy as jnp
 
-from quadruped_pympc.controllers.dpc.dpc_policy_jax import NeuralGRFPolicy
+from quadruped_pympc.controllers.dpc.dpc_policy_jax import (
+    NeuralGRFDistributionPolicy,
+)
 from quadruped_pympc.controllers.dpc.dpc_solver import DPC
 
 
@@ -12,18 +14,18 @@ class DMPPI(DPC):
 
     def __init__(
         self,
-        policy: NeuralGRFPolicy | None = None,
+        policy: NeuralGRFDistributionPolicy | None = None,
         device: str | None = None,
         horizon: int | None = None,
         dt: float | None = None,
         num_dmppi_samples: int = 64,
         dmppi_temperature: float = 0.2,
-        dmppi_noise_std: float = 1e1,
     ):
+        if policy is None:
+            policy = NeuralGRFDistributionPolicy()
         super().__init__(policy=policy, device=device, horizon=horizon, dt=dt)
         self.num_dmppi_samples = int(num_dmppi_samples)
         self.dmppi_temperature = float(dmppi_temperature)
-        self.dmppi_noise_std = float(dmppi_noise_std)
         self.master_key = jax.random.PRNGKey(0)
         self._runtime_inference_step = self._build_runtime_inference_step()
 
@@ -36,13 +38,19 @@ class DMPPI(DPC):
         """Build cached runtime inference with one-step DMPPI correction."""
 
         def runtime_inference_step(params, state, reference, current_contact, key):
-            nominal_grfs = self.policy.apply({"params": params}, state, reference, current_contact)
+            nominal_grfs, nominal_std = self.policy.apply(
+                {"params": params},
+                state,
+                reference,
+                current_contact,
+            )
             nominal_grfs = self.project_grfs(nominal_grfs, current_contact)
             corrected_grfs = self.single_step_dmppi_correction(
                 state,
                 reference,
                 current_contact,
                 nominal_grfs,
+                nominal_std,
                 key,
             )
             input_vec = jnp.concatenate(
@@ -70,15 +78,15 @@ class DMPPI(DPC):
         """Project policy outputs into friction-constrained contact forces."""
         return super().project_grfs(grfs, current_contact)
 
-    def sample_force_candidates(self, nominal_grfs, current_contact, key):
-        """Sample candidate GRFs around the neural proposal."""
-        noise = self.dmppi_noise_std * jax.random.normal(
+    def sample_force_candidates(self, mean_grfs, std_grfs, current_contact, key):
+        """Sample candidate GRFs from the policy's Gaussian proposal."""
+        noise = jax.random.normal(
             key,
-            shape=(self.num_dmppi_samples, nominal_grfs.shape[0]),
+            shape=(self.num_dmppi_samples, mean_grfs.shape[0]),
             dtype=jnp.float32,
         )
-        candidates = nominal_grfs[None, :] + noise
-        nominal = nominal_grfs[None, :]
+        candidates = mean_grfs[None, :] + noise * std_grfs[None, :]
+        nominal = mean_grfs[None, :]
         candidates = jnp.concatenate((nominal, candidates), axis=0)
         return jax.vmap(self.project_grfs, in_axes=(0, None))(candidates, current_contact)
 
@@ -128,9 +136,9 @@ class DMPPI(DPC):
 
         return jax.vmap(candidate_cost)(candidate_grfs)
 
-    def single_step_dmppi_correction(self, state, reference, current_contact, nominal_grfs, key):
+    def single_step_dmppi_correction(self, state, reference, current_contact, nominal_grfs, nominal_std, key):
         """Apply a single-step DMPPI correction around the neural proposal."""
-        candidate_grfs = self.sample_force_candidates(nominal_grfs, current_contact, key)
+        candidate_grfs = self.sample_force_candidates(nominal_grfs, nominal_std, current_contact, key)
         candidate_costs = self.evaluate_force_candidates(
             state,
             reference,
@@ -145,13 +153,19 @@ class DMPPI(DPC):
     def predict_first_step_grfs(self, params, state, reference, current_contact):
         """Predict NN forces, then refine them with one-step DMPPI."""
         self.master_key, subkey = jax.random.split(self.master_key)
-        nominal_grfs = self.policy.apply({"params": params}, state, reference, current_contact)
+        nominal_grfs, nominal_std = self.policy.apply(
+            {"params": params},
+            state,
+            reference,
+            current_contact,
+        )
         nominal_grfs = self.project_grfs(nominal_grfs, current_contact)
         return self.single_step_dmppi_correction(
             jnp.asarray(state, dtype=jnp.float32),
             jnp.asarray(reference, dtype=jnp.float32),
             jnp.asarray(current_contact, dtype=jnp.float32),
             nominal_grfs,
+            jnp.asarray(nominal_std, dtype=jnp.float32),
             subkey,
         )
 

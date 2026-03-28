@@ -25,14 +25,17 @@ class Centroidal_Model_JAX:
 
         self.dt = dt
 
-        if device == "gpu":
-            try:
-                self.device = jax.devices("gpu")[0]
-            except:
+        if isinstance(device, str):
+            if device == "gpu":
+                try:
+                    self.device = jax.devices("gpu")[0]
+                except Exception:
+                    self.device = jax.devices("cpu")[0]
+                    print("GPU not available, using CPU")
+            else:
                 self.device = jax.devices("cpu")[0]
-                print("GPU not available, using CPU")
         else:
-            self.device = jax.devices("cpu")[0]
+            self.device = device
 
         # Mass and Inertia robot dependant
         self.mass = config.mass

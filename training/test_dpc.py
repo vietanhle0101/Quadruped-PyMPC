@@ -12,7 +12,7 @@ def _requested_device_from_argv(argv):
             return arg.split("=", 1)[1].lower()
         if arg == "--device" and idx + 1 < len(argv):
             return argv[idx + 1].lower()
-    return "cpu"
+    return "gpu"
 
 if _requested_device_from_argv(sys.argv[1:]) == "cpu":
     os.environ.setdefault("JAX_PLATFORMS", "cpu")

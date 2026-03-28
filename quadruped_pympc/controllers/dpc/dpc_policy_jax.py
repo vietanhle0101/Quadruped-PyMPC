@@ -2,17 +2,7 @@ import jax
 import jax.numpy as jnp
 import flax.linen as nn
 from flax import struct
-
-
-@struct.dataclass
-class PolicyBounds:
-    """Optional bounds for 2D controls [delta_v, a]."""
-
-    delta_v_min: float
-    delta_v_max: float
-    a_min: float
-    a_max: float
-
+from flax.core import FrozenDict, freeze, unfreeze
 
 class NeuralGRFPolicy(nn.Module):
     """Simple MLP policy for DPC-style first-step GRF prediction.
@@ -151,3 +141,65 @@ class NeuralGRFDistributionPolicy(nn.Module):
         std = jnp.clip(std, a_min=self.min_std, a_max=self.max_std)
         std = std * jnp.repeat(current_contact, 3) + self.min_std * (1.0 - jnp.repeat(current_contact, 3))
         return mean, std
+
+
+def warm_start_distribution_policy_params(
+    deterministic_params,
+    distribution_params,
+):
+    """Warm-start a distribution policy from a trained deterministic DPC policy.
+
+    The mean branch of NeuralGRFDistributionPolicy intentionally mirrors the
+    Dense layer names used by NeuralGRFPolicy:
+    - hidden layers: Dense_0 .. Dense_{num_layers-1}
+    - mean head: Dense_{num_layers}
+
+    This helper copies all matching Dense_* parameters from the
+    deterministic checkpoint into an already-initialized distribution-policy
+    parameter tree, while leaving StdDense untouched.
+
+    Args:
+        deterministic_params: Parameter tree from NeuralGRFPolicy.
+        distribution_params: Initialized parameter tree from
+            NeuralGRFDistributionPolicy.
+
+    Returns:
+        A parameter tree with the mean branch warm-started from the
+        deterministic policy.
+    """
+    deterministic_is_frozen = isinstance(deterministic_params, FrozenDict)
+    distribution_is_frozen = isinstance(distribution_params, FrozenDict)
+
+    deterministic_params = unfreeze(deterministic_params) if deterministic_is_frozen else dict(deterministic_params)
+    warmed_distribution_params = unfreeze(distribution_params) if distribution_is_frozen else dict(distribution_params)
+
+    copied_keys = []
+    for layer_name, deterministic_layer_params in deterministic_params.items():
+        if not layer_name.startswith("Dense_"):
+            continue
+        if layer_name not in warmed_distribution_params:
+            continue
+
+        target_layer_params = warmed_distribution_params[layer_name]
+        for param_name, deterministic_value in deterministic_layer_params.items():
+            if param_name not in target_layer_params:
+                continue
+            if target_layer_params[param_name].shape != deterministic_value.shape:
+                raise ValueError(
+                    "Cannot warm-start distribution policy: "
+                    f"shape mismatch for {layer_name}.{param_name}: "
+                    f"expected {target_layer_params[param_name].shape}, "
+                    f"got {deterministic_value.shape}."
+                )
+            target_layer_params[param_name] = deterministic_value
+
+        copied_keys.append(layer_name)
+
+    if not copied_keys:
+        raise ValueError(
+            "No shared Dense_* layers were found to warm-start. "
+            "Check that the deterministic checkpoint and distribution policy "
+            "use compatible architectures."
+        )
+
+    return freeze(warmed_distribution_params) if distribution_is_frozen else warmed_distribution_params

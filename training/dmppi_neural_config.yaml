@@ -17,10 +17,10 @@ dmppi:
   alpha: 1e-2
   beta: 1e0
   m_samples: 64 # fewer mppi samples
-  updater_n_candidates: 1
+  updater_n_candidates: 4
 
 train_params:
-  n_samples: 500000
+  n_samples: 1000000
   num_epochs: 100
   steps_per_epoch: 500
   batch_size: 16

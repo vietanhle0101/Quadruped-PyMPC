@@ -14,6 +14,8 @@ def _infer_dpc_policy_architecture(checkpoint_path: pathlib.Path):
         checkpoint = pickle.load(file)
 
     params = checkpoint["params"]
+    if isinstance(params, dict) and "policy" in params:
+        params = params["policy"]
     dense_keys = sorted(
         [key for key in params.keys() if key.startswith("Dense_")],
         key=lambda name: int(name.split("_")[1]),
@@ -105,6 +107,7 @@ class SRBDControllerInterface:
             self.controller = Sampling_MPC()
         elif self.type in {"dpc", "dmppi"}:
             from quadruped_pympc.controllers.dpc.dpc_policy_jax import (
+                NeuralMPPIUpdate,
                 NeuralGRFDistributionPolicy,
                 NeuralGRFPolicy,
             )
@@ -126,6 +129,12 @@ class SRBDControllerInterface:
 
             inferred_num_layers, inferred_hidden_dim = _infer_dpc_policy_architecture(checkpoint_path)
             if self.type == "dmppi":
+                updater = None
+                if cfg.mpc_params.get("use_neural_updater", False):
+                    updater = NeuralMPPIUpdate(
+                        nu=12,
+                        K=None,
+                    )
                 policy = NeuralGRFDistributionPolicy(
                     num_layers=inferred_num_layers,
                     hidden_dim=inferred_hidden_dim,
@@ -133,6 +142,7 @@ class SRBDControllerInterface:
                 )
                 self.controller = DMPPI(
                     policy=policy,
+                    updater=updater,
                     device=cfg.mpc_params.get("device", "gpu"),
                     num_dmppi_samples=cfg.mpc_params.get("dmppi_samples", 64),
                     dmppi_temperature=cfg.mpc_params.get("dmppi_temperature", 1.0),

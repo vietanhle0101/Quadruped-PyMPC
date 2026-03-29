@@ -46,7 +46,7 @@ def run_simulation(
     ref_base_lin_vel=(0.0, 2.0),
     ref_base_ang_vel=(-0.4, 0.4),
     friction_coeff=(0.5, 1.0),
-    base_vel_command_type="human", 
+    base_vel_command_type="forward", 
     goal_base_pos=None, # If ``goal_base_pos`` is provided, the function does not rely on keyboard arrows.
     goal_kp=2.0,
     goal_max_lin_vel=1.0,
@@ -61,6 +61,13 @@ def run_simulation(
     """
     np.set_printoptions(precision=3, suppress=True)
     np.random.seed(seed)
+    print(
+        "Simulation command settings: "
+        f"ref_base_lin_vel={ref_base_lin_vel}, "
+        f"ref_base_ang_vel={ref_base_ang_vel}, "
+        f"goal_kp={goal_kp}, "
+        f"goal_max_lin_vel={goal_max_lin_vel}"
+    )
 
     # Extract the robot- and scene-specific parameters once so the inner loop
     # only deals with state updates and control.
@@ -449,10 +456,16 @@ if __name__ == "__main__":
     parser.add_argument("--goal-x", type=float, default=1.0, help="Goal x position in world frame.")
     parser.add_argument("--goal-y", type=float, default=0.0, help="Goal y position in world frame.")
     parser.add_argument(
+        "--goal-kp",
+        type=float,
+        default=0.5,
+        help="Proportional gain used to convert goal position error into a velocity reference.",
+    )
+    parser.add_argument(
         "--goal-max-lin-vel",
         type=float,
-        default=0.1,
-        help="Maximum planar linear velocity command used when driving toward the goal.",
+        default=0.2,
+        help="Maximum planar linear velocity command used during dataset rollouts.",
     )
     args = parser.parse_args()
 
@@ -465,6 +478,7 @@ if __name__ == "__main__":
         num_episodes=1,
         base_vel_command_type="forward",
         goal_base_pos=goal_base_pos,
+        goal_kp=args.goal_kp,
         goal_max_lin_vel=args.goal_max_lin_vel,
         stop_at_goal=True,
     )

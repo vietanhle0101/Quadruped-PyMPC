@@ -73,13 +73,13 @@ def run_dpc_test(
     process=0,
     num_episodes=1,
     num_seconds_per_episode=30,
-    ref_base_lin_vel=(0.0, 4.0),
+    ref_base_lin_vel=(0.0, 2.0),
     ref_base_ang_vel=(-0.4, 0.4),
     friction_coeff=(0.5, 1.0),
     base_vel_command_type="forward",
     goal_base_pos=None,
-    goal_kp=2.0,
-    goal_max_lin_vel=1.0,
+    goal_kp=0.5,
+    goal_max_lin_vel=0.2,
     goal_position_tolerance=0.1,
     seed=0,
     render=True,
@@ -325,21 +325,15 @@ def run_dpc_test(
 
 
 def main():
-    default_policy_file = REPO_ROOT / "training" / "policy_files" / "dpc_constrained_policy.pkl"
+    default_policy_file = REPO_ROOT / "training" / "dpc_constrained_policy.pkl"
     default_config_path = REPO_ROOT / "training" / "dpc_config.yaml"
     parser = argparse.ArgumentParser(description="Test a trained DPC policy through QuadrupedPyMPC_Wrapper.")
     parser.add_argument("--policy_file", type=pathlib.Path, default=default_policy_file, help="Path to the trained DPC checkpoint.")
     parser.add_argument("--config", type=pathlib.Path, default=default_config_path, help="Path to the YAML config used to define the policy architecture.")
     parser.add_argument("--device", type=str, default="gpu", choices=("cpu", "gpu"), help="JAX device preference for the DPC policy.")
     parser.add_argument("--seed", type=int, default=0, help="Random seed.")
-    parser.add_argument("--goal-x", type=float, default=3.0, help="Goal x position in world frame.")
+    parser.add_argument("--goal-x", type=float, default=1.0, help="Goal x position in world frame.")
     parser.add_argument("--goal-y", type=float, default=0.0, help="Goal y position in world frame.")
-    parser.add_argument(
-        "--goal-max-lin-vel",
-        type=float,
-        default=0.1,
-        help="Maximum planar linear velocity command used when driving toward the goal.",
-    )
     parser.add_argument("--no-render", action="store_true", help="Disable Mujoco rendering.")
     args = parser.parse_args()
 
@@ -355,7 +349,6 @@ def main():
         policy_config=policy_config,
         qpympc_cfg=cfg,
         goal_base_pos=goal_base_pos,
-        goal_max_lin_vel=args.goal_max_lin_vel,
         seed=args.seed,
         render=not args.no_render,
         device=args.device,

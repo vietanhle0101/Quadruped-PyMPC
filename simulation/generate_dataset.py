@@ -231,7 +231,9 @@ def generate_dpc_dataset(
     num_seconds_per_rollout=10.0,
     render=False,
     seed=0,
-    ref_base_lin_vel: tuple[float, float] = (0.0, 2.0),
+    ref_base_lin_vel=(0.0, 2.0),
+    ref_base_ang_vel=(-0.4, 0.4),
+    friction_coeff=(0.5, 1.0),
     goal_kp: float = 2.0,
     goal_max_lin_vel: float = 1.0,
     goal_position_tolerance: float = 0.1,
@@ -251,13 +253,21 @@ def generate_dpc_dataset(
     rng = np.random.default_rng(seed)
     hip_height = qpympc_cfg.hip_height
 
+    print(
+        "Dataset rollout settings: "
+        f"ref_base_lin_vel={ref_base_lin_vel}, "
+        f"ref_base_ang_vel={ref_base_ang_vel}, "
+        f"goal_kp={goal_kp}, "
+        f"goal_max_lin_vel={goal_max_lin_vel}"
+    )
+
     env = QuadrupedEnv(
         robot=qpympc_cfg.robot,
         scene=qpympc_cfg.simulation_params["scene"],
         sim_dt=qpympc_cfg.simulation_params["dt"],
         ref_base_lin_vel=np.asarray(ref_base_lin_vel) * hip_height,
-        ref_base_ang_vel=(0.0, 0.0),
-        ground_friction_coeff=(0.5, 1.0),
+        ref_base_ang_vel=ref_base_ang_vel,
+        ground_friction_coeff=friction_coeff,
         base_vel_command_type="forward",
         state_obs_names=tuple(),
     )
@@ -471,32 +481,20 @@ if __name__ == "__main__":
     parser.add_argument(
         "--num-seconds-per-rollout",
         type=float,
-        default=10.0,
+        default=50.0,
         help="Maximum simulated seconds per rollout.",
     )
     parser.add_argument("--seed", type=int, default=0, help="Random seed for dataset generation.")
     parser.add_argument(
-        "--ref-base-lin-vel-min",
-        type=float,
-        default=0.0,
-        help="Minimum linear velocity reference passed to QuadrupedEnv before hip-height scaling.",
-    )
-    parser.add_argument(
-        "--ref-base-lin-vel-max",
-        type=float,
-        default=2.0,
-        help="Maximum linear velocity reference passed to QuadrupedEnv before hip-height scaling.",
-    )
-    parser.add_argument(
         "--goal-kp",
         type=float,
-        default=2.0,
+        default=0.5,
         help="Proportional gain used to convert goal position error into a velocity reference.",
     )
     parser.add_argument(
         "--goal-max-lin-vel",
         type=float,
-        default=1.0,
+        default=0.2,
         help="Maximum planar linear velocity command used during dataset rollouts.",
     )
     parser.add_argument(
@@ -531,7 +529,6 @@ if __name__ == "__main__":
         num_seconds_per_rollout=args.num_seconds_per_rollout,
         render=args.render,
         seed=args.seed,
-        ref_base_lin_vel=(args.ref_base_lin_vel_min, args.ref_base_lin_vel_max),
         goal_kp=args.goal_kp,
         goal_max_lin_vel=args.goal_max_lin_vel,
         goal_position_tolerance=args.goal_position_tolerance,

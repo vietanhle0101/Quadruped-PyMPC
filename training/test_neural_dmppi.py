@@ -78,6 +78,7 @@ def configure_dmppi_controller(
     dmppi_temperature: float,
 ):
     cfg.mpc_params["type"] = "dmppi"
+    cfg.mpc_params["use_neural_updater"] = True
     cfg.mpc_params["device"] = device
     cfg.mpc_params["dpc_policy_path"] = str(policy_file_path)
     cfg.mpc_params["dpc_num_layers"] = policy_config.get("num_layers", 5)
@@ -131,6 +132,7 @@ def run_dmppi_test(
         f"dmppi_samples={cfg.mpc_params['dmppi_samples']}, "
         f"dmppi_temperature={cfg.mpc_params['dmppi_temperature']}"
     )
+    print("Neural updater: enabled")
 
     robot_name = qpympc_cfg.robot
     hip_height = qpympc_cfg.hip_height
@@ -359,15 +361,21 @@ def run_dmppi_test(
 
 
 def main():
-    default_policy_file = REPO_ROOT / "training" / "dmppi_constrained_policy.pkl"
-    default_config_path = REPO_ROOT / "training" / "dmppi_config.yaml"
-    parser = argparse.ArgumentParser(description="Test a trained DMPPI policy through QuadrupedPyMPC_Wrapper.")
-    parser.add_argument("--policy_file", type=pathlib.Path, default=default_policy_file, help="Path to the trained DMPPI checkpoint.")
-    parser.add_argument("--config", type=pathlib.Path, default=default_config_path, help="Path to the DMPPI YAML config.")
+    default_policy_file = REPO_ROOT / "training" / "neural_dmppi_constrained_policy.pkl"
+    default_config_path = REPO_ROOT / "training" / "dmppi_neural_config.yaml"
+    parser = argparse.ArgumentParser(description="Test a trained neural-updater DMPPI policy through QuadrupedPyMPC_Wrapper.")
+    parser.add_argument("--policy_file", type=pathlib.Path, default=default_policy_file, help="Path to the trained neural DMPPI checkpoint.")
+    parser.add_argument("--config", type=pathlib.Path, default=default_config_path, help="Path to the neural DMPPI YAML config.")
     parser.add_argument("--device", type=str, default="gpu", choices=("cpu", "gpu"), help="JAX device preference for the DMPPI policy.")
     parser.add_argument("--seed", type=int, default=0, help="Random seed.")
     parser.add_argument("--goal-x", type=float, default=1.0, help="Goal x position in world frame.")
     parser.add_argument("--goal-y", type=float, default=0.0, help="Goal y position in world frame.")
+    parser.add_argument(
+        "--goal-max-lin-vel",
+        type=float,
+        default=0.1,
+        help="Maximum planar linear velocity command used when driving toward the goal.",
+    )
     parser.add_argument("--dmppi-num-samples", type=int, default=None, help="Override the number of one-step DMPPI force samples.")
     parser.add_argument("--dmppi-temperature", type=float, default=None, help="Override the softmax temperature for DMPPI weighting.")
     parser.add_argument("--no-render", action="store_true", help="Disable Mujoco rendering.")
@@ -386,6 +394,7 @@ def main():
         policy_config=policy_config,
         qpympc_cfg=cfg,
         goal_base_pos=goal_base_pos,
+        goal_max_lin_vel=args.goal_max_lin_vel,
         seed=args.seed,
         render=not args.no_render,
         device=args.device,

@@ -348,7 +348,6 @@ class Sampling_MPC:
         Returns:
             (float): cost of the rollout
         """
-
         state = initial_state
         cost = jnp.float32(0.0)
         n_ = jnp.array([-1, -1, -1, -1])
@@ -825,7 +824,6 @@ class Sampling_MPC:
         """
         This function computes the control parameters by MPPI.
         """
-
         # Generate random parameters
         # The first control parameters is the old best one, so we add zero noise there
         additional_random_parameters = self.initial_random_parameters * 0.0

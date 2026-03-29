@@ -9,7 +9,11 @@ from quadruped_pympc.controllers.dpc.dmppi_solver import DMPPI
 class DMPPI_Trainer(DPC_Trainer):
     """Training for DMPPI policies built on top of DPC_Trainer."""
 
-    def __init__(self, dmppi_solver: DMPPI, alpha: float = 1e-3):
+    def __init__(
+        self,
+        dmppi_solver: DMPPI,
+        alpha: float = 1e-3,
+    ):
         super().__init__(dmppi_solver)
         self.dmppi_solver = dmppi_solver
         self.alpha = float(alpha)
@@ -17,9 +21,57 @@ class DMPPI_Trainer(DPC_Trainer):
             lambda params, batch, rollout_key: self._loss_and_metrics(params, batch, rollout_key)
         )
 
+    def init_neural_dmppi_train_params(
+        self,
+        beta: float = 0.0,
+        m_samples: int = 8,
+        updater_n_candidates: int | None = None,
+    ):
+        self.beta = float(beta)
+        self.m_samples = int(m_samples)
+        self.updater_n_candidates = updater_n_candidates
+
     def init_params(self, key):
-        """Initialize policy parameters through the associated DMPPI solver."""
-        return self.dmppi_solver.init_policy_params(key)
+        """Initialize trainable params for policy, and updater when present."""
+        if self.dmppi_solver.updater is None:
+            return self.dmppi_solver.init_policy_params(key)
+
+        policy_key, updater_key = jax.random.split(key)
+        return {
+            "policy": self.dmppi_solver.init_policy_params(policy_key),
+            "updater": self.init_updater_params(updater_key),
+        }
+
+    def init_updater_params(self, key):
+        """Initialize neural updater parameters when a learned updater is present."""
+        if self.dmppi_solver.updater is None:
+            return None
+
+        updater = self.dmppi_solver.updater
+        dummy_u_mean = jnp.zeros((1, updater.nu), dtype=jnp.float32)
+        dummy_u_cov = jnp.ones((1, updater.nu), dtype=jnp.float32)
+        dummy_costs = jnp.zeros(
+            (1, updater.K if updater.K is not None else self.dmppi_solver.num_dmppi_samples + 1),
+            dtype=jnp.float32,
+        )
+        return updater.init(
+            key,
+            dummy_u_mean,
+            dummy_u_cov,
+            dummy_costs,
+        )["params"]
+
+    def _policy_params(self, params):
+        """Extract policy params from either a plain or combined param tree."""
+        if isinstance(params, dict) and "policy" in params:
+            return params["policy"]
+        return params
+
+    def _updater_params(self, params):
+        """Extract updater params from a combined param tree."""
+        if isinstance(params, dict) and "updater" in params:
+            return params["updater"]
+        return None
 
     def expl_loss(self, std_trajectory):
         """Entropy of the diagonal neural proposal distribution."""
@@ -29,28 +81,135 @@ class DMPPI_Trainer(DPC_Trainer):
         h = jnp.sum(jnp.log(safe_std), axis=-1) + const
         return jnp.mean(h, axis=-1)
 
-    def rollout_single(self, x0_single, R_single, C_single, params, rollout_key):
+    def _updater_supervised_loss(self, updater_params, u_mean, u_cov, costs, u_star_true, key):
+        """Regress subset-based updater predictions to the full MPPI target."""
+        if self.dmppi_solver.updater is None or updater_params is None:
+            return jnp.zeros((), dtype=costs.dtype)
+
+        batch_size, num_rollouts = costs.shape
+        subset_size = max(1, min(self.m_samples, num_rollouts))
+        default_candidates = max(1, num_rollouts // subset_size)
+        num_candidates = default_candidates if self.updater_n_candidates is None else int(self.updater_n_candidates)
+        num_candidates = max(1, num_candidates)
+        num_used = num_candidates * subset_size
+
+        if num_used <= num_rollouts:
+            perm_keys = jax.random.split(key, batch_size)
+            subset_idx = jax.vmap(
+                lambda subkey: jax.random.permutation(subkey, num_rollouts)[:num_used]
+            )(perm_keys).reshape(batch_size, num_candidates, subset_size)
+        else:
+            subset_idx = jax.random.randint(
+                key,
+                shape=(batch_size, num_candidates, subset_size),
+                minval=0,
+                maxval=num_rollouts,
+            )
+
+        subset_costs = jnp.take_along_axis(
+            costs,
+            subset_idx.reshape(batch_size, num_used),
+            axis=1,
+        ).reshape(batch_size, num_candidates, subset_size)
+
+        u_mean_rep = jnp.broadcast_to(
+            u_mean[:, None, :],
+            (batch_size, num_candidates, u_mean.shape[-1]),
+        )
+        if u_cov.ndim == 2:
+            u_cov_rep = jnp.broadcast_to(
+                u_cov[:, None, :],
+                (batch_size, num_candidates, u_cov.shape[-1]),
+            )
+        elif u_cov.ndim == 3:
+            u_cov_rep = jnp.broadcast_to(
+                u_cov[:, None, :, :],
+                (batch_size, num_candidates, u_cov.shape[-2], u_cov.shape[-1]),
+            )
+        else:
+            raise ValueError(f"u_cov shape not supported: {u_cov.shape}")
+
+        num_contacts = u_mean.shape[-1] // 3
+        repeated_contact = jnp.ones((batch_size * num_candidates, num_contacts), dtype=jnp.float32)
+        u_pred = self.dmppi_solver.updater.apply(
+            {"params": updater_params},
+            u_mean_rep.reshape(batch_size * num_candidates, *u_mean.shape[1:]),
+            u_cov_rep.reshape(batch_size * num_candidates, *u_cov.shape[1:]),
+            subset_costs.reshape(batch_size * num_candidates, subset_size),
+            current_contact=repeated_contact,
+        ).reshape(batch_size, num_candidates, -1)
+
+        u_target = jnp.broadcast_to(
+            u_star_true[:, None, :],
+            u_pred.shape,
+        )
+        return jnp.mean((u_pred - u_target) ** 2)
+
+    def rollout_single(
+        self,
+        x0_single: jnp.ndarray,
+        R_single: jnp.ndarray,
+        C_single: jnp.ndarray,
+        params,
+        rollout_key: jax.Array,
+    ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
         """Run a single-sample rollout using the DMPPI."""
 
         def step_fn(state, inputs):
             reference, current_contact, step_idx = inputs
+            policy_params = self._policy_params(params)
+            updater_params = self._updater_params(params)
 
             nominal_grfs, nominal_std = self.dmppi_solver.policy.apply(
-                {"params": params},
+                {"params": policy_params},
                 state,
                 reference,
                 current_contact,
             )
             nominal_grfs = self.dmppi_solver.project_grfs(nominal_grfs, current_contact)
             step_key = jax.random.fold_in(rollout_key, step_idx)
-            grfs = self.dmppi_solver.single_step_dmppi_correction(
+            sample_key, updater_key = jax.random.split(step_key)
+            candidate_grfs = self.dmppi_solver.sample_force_candidates(
+                nominal_grfs,
+                nominal_std,
+                current_contact,
+                sample_key,
+            )
+            candidate_costs = self.dmppi_solver.evaluate_force_candidates(
                 state,
                 reference,
                 current_contact,
-                nominal_grfs,
-                nominal_std,
-                step_key,
+                candidate_grfs,
             )
+            stabilized_costs = candidate_costs - jnp.min(candidate_costs)
+            u_star_true = self.dmppi_solver._mppi_weighted_update(
+                candidate_grfs,
+                stabilized_costs,
+                self.dmppi_solver.dmppi_temperature,
+            )
+
+            if self.dmppi_solver.updater is None or updater_params is None:
+                # If no updater, use the MPPI update and updater_sup = 0
+                grfs = u_star_true
+                updater_sup = 0.0
+            else:
+                # Otherwise, compute the updater prediction and a supervised loss against the MPPI target 
+                grfs = self.dmppi_solver.updater.apply(
+                    {"params": updater_params},
+                    nominal_grfs[None, :],
+                    nominal_std[None, :],
+                    stabilized_costs[None, :],
+                    current_contact=current_contact[None, :],
+                )[0]
+                grfs = self.dmppi_solver.project_grfs(grfs, current_contact)                
+                updater_sup = self._updater_supervised_loss(
+                    updater_params,
+                    nominal_grfs[None, :],
+                    nominal_std[None, :],
+                    stabilized_costs[None, :],
+                    u_star_true[None, :],
+                    updater_key,
+                )
             grfs_matrix = grfs.reshape(4, 3)
 
             number_of_legs_in_stance = jnp.sum(current_contact)
@@ -95,9 +254,8 @@ class DMPPI_Trainer(DPC_Trainer):
             outputs = {
                 "state": next_state,
                 "control": grfs,
-                "track": track,
-                "pen": pen,
                 "proposal_std": nominal_std,
+                "updater_sup": updater_sup,
                 "loss": loss,
             }
             return next_state, outputs
@@ -108,11 +266,11 @@ class DMPPI_Trainer(DPC_Trainer):
 
         X = jnp.concatenate((x0_single[None, :], outputs["state"]), axis=0)
         U = outputs["control"]
-        track_mean = jnp.mean(outputs["track"])
-        pen_mean = jnp.mean(outputs["pen"])
         expl_mean = self.expl_loss(outputs["proposal_std"][None, ...])[0]
-        loss = track_mean + pen_mean - self.alpha * expl_mean
-        return loss, track_mean, pen_mean, expl_mean, X, U
+        updater_sup_mean = jnp.mean(outputs["updater_sup"])
+        rollout_loss = jnp.mean(outputs["loss"])
+        loss = rollout_loss - self.alpha * expl_mean + self.beta * updater_sup_mean
+        return loss, expl_mean, updater_sup_mean, X, U
 
     def forward(self, params, x0, R, C, rollout_key):
         """Run one DMPPI rollout batch and include an entropy exploration bonus."""
@@ -133,15 +291,14 @@ class DMPPI_Trainer(DPC_Trainer):
                 sample_rollout_key,
             ),
             in_axes=(0, 0, 0, 0),
-            out_axes=(0, 0, 0, 0, 0, 0),
+            out_axes=(0, 0, 0, 0, 0),
         )
-        loss, track, pen, expl, X, U = batched_forward(x0, R, C, rollout_keys)
+        loss, expl, updater_sup, X, U = batched_forward(x0, R, C, rollout_keys)
 
         return {
             "loss": jnp.mean(loss),
-            "track_mean": jnp.mean(track),
-            "pen_mean": jnp.mean(pen),
             "expl_mean": jnp.mean(expl),
+            "updater_sup_mean": jnp.mean(updater_sup),
             "X": X,
             "U": U,
         }
@@ -164,9 +321,8 @@ class DMPPI_Trainer(DPC_Trainer):
             rollout_key,
         )
         metrics = {
-            "track_mean": output["track_mean"],
-            "pen_mean": output["pen_mean"],
             "expl_mean": output["expl_mean"],
+            "updater_sup_mean": output["updater_sup_mean"],
         }
         return output["loss"], metrics
 
@@ -205,6 +361,14 @@ class DMPPI_Trainer(DPC_Trainer):
         early_stop_min_delta = training_params.get("early_stop_min_delta", 1e-4)
         seed = training_params.get("seed", 0)
         eval_seed = training_params.get("eval_seed", 123)
+        use_neural_updater = self.dmppi_solver.updater is not None
+
+        if use_neural_updater:
+            if not hasattr(self, "beta") or not hasattr(self, "m_samples") or not hasattr(self, "updater_n_candidates"):
+                self.init_neural_dmppi_train_params()
+        else:
+            if not hasattr(self, "beta"):
+                self.beta = 0.0
 
         current_lr = lr
         optimizer = self._make_optimizer(current_lr, weight_decay, grad_clip)
@@ -231,6 +395,7 @@ class DMPPI_Trainer(DPC_Trainer):
         for epoch in range(start_epoch + 1, num_epochs + 1):
             loss_sum = 0.0
             expl_sum = 0.0
+            updater_sup_sum = 0.0
 
             for iteration in range(1, steps_per_epoch + 1):
                 train_rng, batch_key, rollout_key = jax.random.split(train_rng, 3)
@@ -246,24 +411,36 @@ class DMPPI_Trainer(DPC_Trainer):
 
                 batch_loss = float(loss_value)
                 batch_expl = float(train_metrics["expl_mean"])
+                batch_updater_sup = float(train_metrics["updater_sup_mean"])
                 loss_sum += batch_loss
                 expl_sum += batch_expl
+                updater_sup_sum += batch_updater_sup
 
                 if iteration == 1 or (iteration % log_every) == 0:
-                    print(
-                        f"[ep {epoch:03d} it {iteration:04d}/{steps_per_epoch}] "
-                        f"batch_loss={batch_loss:.6e} "
-                        f"expl_mean={batch_expl:.6e} "
-                    )
+                    if use_neural_updater:
+                        print(
+                            f"[ep {epoch:03d} it {iteration:04d}/{steps_per_epoch}] "
+                            f"batch_loss={batch_loss:.6e} "
+                            f"expl_mean={batch_expl:.6e} "
+                            f"updater_sup={batch_updater_sup:.6e} "
+                        )
+                    else:
+                        print(
+                            f"[ep {epoch:03d} it {iteration:04d}/{steps_per_epoch}] "
+                            f"batch_loss={batch_loss:.6e} "
+                            f"expl_mean={batch_expl:.6e} "
+                        )
 
             denom = float(steps_per_epoch)
             train_loss = loss_sum / denom
             train_expl = expl_sum / denom
+            train_updater_sup = updater_sup_sum / denom
 
             eval_rng, eval_rollout_key = jax.random.split(eval_rng)
             eval_loss_value, eval_metrics = self._eval_step(params, eval_batch, eval_rollout_key)
             eval_loss = float(eval_loss_value)
             eval_expl = float(eval_metrics["expl_mean"])
+            eval_updater_sup = float(eval_metrics["updater_sup_mean"])
 
             if cooldown_counter > 0:
                 cooldown_counter -= 1
@@ -289,25 +466,48 @@ class DMPPI_Trainer(DPC_Trainer):
                     bad_plateau_epochs = 0
                     print(f"reduced learning rate to {current_lr:.2e}")
 
-            print(
-                f"[epoch {epoch:03d}] "
-                f"train_loss={train_loss:.6e} | "
-                f"train_expl={train_expl:.6e} | "
-                f"eval_loss={eval_loss:.6e} | "
-                f"eval_expl={eval_expl:.6e} | "
-                f"lr={current_lr:.2e}"
-            )
-
-            history.append(
-                {
-                    "epoch": epoch,
-                    "train_loss": train_loss,
-                    "train_expl": train_expl,
-                    "eval_loss": eval_loss,
-                    "eval_expl": eval_expl,
-                    "lr": current_lr,
-                }
-            )
+            if use_neural_updater:
+                print(
+                    f"[epoch {epoch:03d}] "
+                    f"train_loss={train_loss:.6e} | "
+                    f"train_expl={train_expl:.6e} | "
+                    f"train_updater_sup={train_updater_sup:.6e} | "
+                    f"eval_loss={eval_loss:.6e} | "
+                    f"eval_expl={eval_expl:.6e} | "
+                    f"eval_updater_sup={eval_updater_sup:.6e} | "
+                    f"lr={current_lr:.2e}"
+                )
+                history.append(
+                    {
+                        "epoch": epoch,
+                        "train_loss": train_loss,
+                        "train_expl": train_expl,
+                        "train_updater_sup": train_updater_sup,
+                        "eval_loss": eval_loss,
+                        "eval_expl": eval_expl,
+                        "eval_updater_sup": eval_updater_sup,
+                        "lr": current_lr,
+                    }
+                )
+            else:
+                print(
+                    f"[epoch {epoch:03d}] "
+                    f"train_loss={train_loss:.6e} | "
+                    f"train_expl={train_expl:.6e} | "
+                    f"eval_loss={eval_loss:.6e} | "
+                    f"eval_expl={eval_expl:.6e} | "
+                    f"lr={current_lr:.2e}"
+                )
+                history.append(
+                    {
+                        "epoch": epoch,
+                        "train_loss": train_loss,
+                        "train_expl": train_expl,
+                        "eval_loss": eval_loss,
+                        "eval_expl": eval_expl,
+                        "lr": current_lr,
+                    }
+                )
 
             improved = eval_loss < (best_eval_loss - early_stop_min_delta)
             if improved:

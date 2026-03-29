@@ -4,6 +4,7 @@ import flax.linen as nn
 from flax import struct
 from flax.core import FrozenDict, freeze, unfreeze
 
+
 class NeuralGRFPolicy(nn.Module):
     """Simple MLP policy for DPC-style first-step GRF prediction.
 
@@ -203,3 +204,161 @@ def warm_start_distribution_policy_params(
         )
 
     return freeze(warmed_distribution_params) if distribution_is_frozen else warmed_distribution_params
+
+
+class MLP(nn.Module):
+    """Simple Flax MLP helper with optional dropout."""
+
+    out_dim: int
+    hidden_dim: int
+    num_hidden_layers: int
+    activation: str = "gelu"
+    dropout: float = 0.0
+    zero_init_output: bool = False
+
+    def _activation(self, x):
+        if self.activation == "relu":
+            return jax.nn.relu(x)
+        if self.activation == "gelu":
+            return jax.nn.gelu(x)
+        if self.activation == "tanh":
+            return jnp.tanh(x)
+        if self.activation == "silu":
+            return jax.nn.silu(x)
+        raise ValueError(f"Unsupported activation='{self.activation}'")
+
+    @nn.compact
+    def __call__(self, x, deterministic: bool = True):
+        for _ in range(self.num_hidden_layers):
+            x = nn.Dense(self.hidden_dim)(x)
+            x = self._activation(x)
+            if self.dropout > 0.0:
+                x = nn.Dropout(rate=self.dropout)(x, deterministic=deterministic)
+
+        output_kernel_init = nn.initializers.zeros if self.zero_init_output else nn.initializers.lecun_normal()
+        return nn.Dense(
+            self.out_dim,
+            kernel_init=output_kernel_init,
+            bias_init=nn.initializers.zeros,
+        )(x)
+
+
+class NeuralMPPIUpdate(nn.Module):
+    """Neural MPPI update block in Flax/JAX.
+    Inputs:
+    - u_mean: (B, nu)
+    - u_cov: (B, nu) or (B, nu, nu)
+    - costs: (B, K)
+
+    Output:
+    - u_star: (B, nu)
+    """
+    nu: int
+    K: int | None = None
+    hidden_dim: int = 128
+    num_hidden_layers: tuple[int, int, int] = (2, 2, 2)
+    activation: str = "gelu"
+    dropout: float = 0.0
+    max_fx: float = 30.0
+    max_fy: float = 30.0
+    max_fz: float = 241.68897
+
+    def setup(self):
+        if len(self.num_hidden_layers) != 3:
+            raise ValueError("num_hidden_layers must have 3 ints: [global, cost, head]")
+
+        n_global, n_cost, n_head = map(int, self.num_hidden_layers)
+        self.global_mlp = MLP(
+            out_dim=self.hidden_dim,
+            hidden_dim=self.hidden_dim,
+            num_hidden_layers=n_global,
+            activation=self.activation,
+            dropout=self.dropout,
+        )
+        self.cost_mlp = MLP(
+            out_dim=self.hidden_dim,
+            hidden_dim=self.hidden_dim,
+            num_hidden_layers=n_cost,
+            activation=self.activation,
+            dropout=self.dropout,
+        )
+        self.cost_pool = MLP(
+            out_dim=self.hidden_dim,
+            hidden_dim=self.hidden_dim,
+            num_hidden_layers=max(n_cost - 1, 0),
+            activation=self.activation,
+            dropout=self.dropout,
+        )
+        self.head = MLP(
+            out_dim=self.nu,
+            hidden_dim=self.hidden_dim,
+            num_hidden_layers=n_head,
+            activation=self.activation,
+            dropout=self.dropout,
+            zero_init_output=True,
+        )
+
+    def _apply_force_bounds(self, u_star_raw, current_contact=None):
+        """Bound outputs as GRFs, matching NeuralGRFPolicy semantics."""
+        if self.nu % 3 != 0:
+            raise ValueError(f"Expected force dimension to be a multiple of 3, got nu={self.nu}")
+
+        num_contacts = self.nu // 3
+        grfs = u_star_raw.reshape((-1, num_contacts, 3))
+
+        fx = self.max_fx * jnp.tanh(grfs[..., 0])
+        fy = self.max_fy * jnp.tanh(grfs[..., 1])
+        fz = self.max_fz * jax.nn.sigmoid(grfs[..., 2])
+        bounded = jnp.stack((fx, fy, fz), axis=-1)
+
+        if current_contact is not None:
+            if current_contact.shape != (u_star_raw.shape[0], num_contacts):
+                raise ValueError(
+                    f"Expected current_contact shape {(u_star_raw.shape[0], num_contacts)}, "
+                    f"got {current_contact.shape}"
+                )
+            bounded = bounded * current_contact[..., None]
+
+        return bounded.reshape((-1, self.nu))
+
+    def _cov_features(self, u_cov):
+        """Return covariance summary (B, nu + 1) = [diag_like, logdet_like]."""
+        if u_cov.ndim == 2:
+            diag = jax.nn.softplus(u_cov)
+            logdet_like = jnp.log(diag + 1e-8).sum(axis=-1, keepdims=True)
+        elif u_cov.ndim == 3:
+            diag = jnp.diagonal(u_cov, axis1=-2, axis2=-1)
+            diag = jax.nn.softplus(diag)
+            logdet_like = jnp.log(diag + 1e-8).sum(axis=-1, keepdims=True)
+        else:
+            raise ValueError(f"u_cov shape not supported: {u_cov.shape}")
+        return jnp.concatenate((diag, logdet_like), axis=-1)
+
+    def _encode_costs(self, costs, deterministic: bool = True):
+        """DeepSets-style permutation-invariant encoder over sampled costs."""
+        normalized_costs = (costs - costs.mean(axis=1, keepdims=True)) / (
+            costs.std(axis=1, keepdims=True) + 1e-6
+        )
+        elem_feat = self.cost_mlp(normalized_costs[..., None], deterministic=deterministic)
+        pooled_feat = elem_feat.mean(axis=1)
+        return self.cost_pool(pooled_feat, deterministic=deterministic)
+
+    @nn.compact
+    def __call__(self, u_mean, u_cov, costs, current_contact=None, deterministic: bool = True):
+        batch_size, nu = u_mean.shape
+        if nu != self.nu:
+            raise ValueError(f"Expected nu={self.nu}, got {nu}")
+        if costs.ndim != 2 or costs.shape[0] != batch_size:
+            raise ValueError(f"Expected costs shape (B, K), got {costs.shape}")
+        if self.K is not None and costs.shape[1] != self.K:
+            raise ValueError(f"Expected costs shape (B, {self.K}), got {costs.shape}")
+
+        cov_feat = self._cov_features(u_cov)
+        global_feat = self.global_mlp(
+            jnp.concatenate((u_mean, cov_feat), axis=-1),
+            deterministic=deterministic,
+        )
+        cost_feat = self._encode_costs(costs, deterministic=deterministic)
+        context = jnp.concatenate((global_feat, cost_feat), axis=-1)
+        u_star_raw = self.head(context, deterministic=deterministic)
+        return self._apply_force_bounds(u_star_raw, current_contact=current_contact)

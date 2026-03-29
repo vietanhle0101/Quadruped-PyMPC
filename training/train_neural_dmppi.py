@@ -13,6 +13,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from quadruped_pympc.controllers.dpc.dpc_policy_jax import (
     NeuralGRFDistributionPolicy,
+    NeuralMPPIUpdate,
     warm_start_distribution_policy_params,
 )
 from quadruped_pympc.controllers.dpc.dmppi_solver import DMPPI
@@ -92,14 +93,24 @@ def normalize_dmppi_config(dmppi_config: dict):
     normalized = dict(dmppi_config)
     if "dmppi_samples" in normalized and normalized["dmppi_samples"] is not None:
         normalized["dmppi_samples"] = int(normalized["dmppi_samples"])
-    for key in ("dmppi_temperature", "alpha"):
+    for key in ("m_samples", "updater_n_candidates"):
+        if key in normalized and normalized[key] is not None:
+            normalized[key] = int(normalized[key])
+    for key in ("dmppi_temperature", "alpha", "beta"):
         if key in normalized and normalized[key] is not None:
             normalized[key] = float(normalized[key])
     return normalized
 
 
+def resolve_warm_start_policy_params(checkpoint_params):
+    """Extract policy params from supported warm-start checkpoint formats."""
+    if isinstance(checkpoint_params, dict) and "policy" in checkpoint_params:
+        return checkpoint_params["policy"]
+    return checkpoint_params
+
+
 def main():
-    default_config_path = CURRENT_DIR / "dmppi_config.yaml"
+    default_config_path = CURRENT_DIR / "dmppi_neural_config.yaml"
 
     parser = argparse.ArgumentParser(description="Train the DMPPI policy from a YAML config.")
     parser.add_argument(
@@ -152,8 +163,13 @@ def main():
         max_fy=policy_config.get("max_fy", 30.0),
         max_fz=policy_config.get("max_fz", 241.68897),
     )
+    mppi_updater = NeuralMPPIUpdate(
+        nu=12,
+        K=None,
+    )
     dmppi_solver = DMPPI(
         policy=policy,
+        updater=mppi_updater,
         device=device,
         num_dmppi_samples=dmppi_config.get("dmppi_samples", 64),
         dmppi_temperature=dmppi_config.get("dmppi_temperature", 0.2),
@@ -161,6 +177,11 @@ def main():
     trainer = DMPPI_Trainer(
         dmppi_solver,
         alpha=dmppi_config.get("alpha", 1e-3),
+    )
+    trainer.init_neural_dmppi_train_params(
+        beta=dmppi_config.get("beta", 0.0),
+        m_samples=dmppi_config.get("m_samples", 8),
+        updater_n_candidates=dmppi_config.get("updater_n_candidates"),
     )
     trainer.load_dataset(
         data_filename=dataset_path,
@@ -180,7 +201,10 @@ def main():
         "DMPPI settings: "
         f"num_dmppi_samples={dmppi_solver.num_dmppi_samples}, "
         f"dmppi_temperature={dmppi_solver.dmppi_temperature}, "
-        f"alpha={trainer.alpha}"
+        f"alpha={trainer.alpha}, "
+        f"beta={trainer.beta}, "
+        f"m_samples={trainer.m_samples}, "
+        f"updater_n_candidates={trainer.updater_n_candidates}"
     )
 
     retrain_path = resolve_repo_path(str(args.retrain), base_dir=config_path.parent) if args.retrain is not None else None
@@ -196,18 +220,25 @@ def main():
         )
     else:
         initial_params = None
+        init_key = jax.random.PRNGKey(train_params.get("seed", 0))
+
         if warm_start_path is not None:
             with open(warm_start_path, "rb") as file:
                 warm_start_checkpoint = pickle.load(file)
 
-            deterministic_params = warm_start_checkpoint["params"]
-            init_key = jax.random.PRNGKey(train_params.get("seed", 0))
+            warm_start_params = resolve_warm_start_policy_params(warm_start_checkpoint["params"])
             initial_params = trainer.init_params(init_key)
-            initial_params = warm_start_distribution_policy_params(
-                deterministic_params=deterministic_params,
-                distribution_params=initial_params,
-            )
-            print(f"Warm-started DMPPI mean branch from: {warm_start_path}")
+            if "StdDense" in warm_start_params:
+                initial_params["policy"] = warm_start_params
+                print(f"Warm-started DMPPI policy from pretrained distribution policy: {warm_start_path}")
+            else:
+                initial_params["policy"] = warm_start_distribution_policy_params(
+                    deterministic_params=warm_start_params,
+                    distribution_params=initial_params["policy"],
+                )
+                print(f"Warm-started DMPPI mean branch from deterministic policy: {warm_start_path}")
+        else:
+            initial_params = trainer.init_params(init_key)
 
         result = trainer.train(train_params, params=initial_params)
 

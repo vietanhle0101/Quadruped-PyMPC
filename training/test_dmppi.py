@@ -63,8 +63,8 @@ def normalize_policy_config(policy_config: dict):
 
 def normalize_dmppi_config(dmppi_config: dict):
     normalized = dict(dmppi_config)
-    if "num_dmppi_samples" in normalized and normalized["num_dmppi_samples"] is not None:
-        normalized["num_dmppi_samples"] = int(normalized["num_dmppi_samples"])
+    if "dmppi_samples" in normalized and normalized["dmppi_samples"] is not None:
+        normalized["dmppi_samples"] = int(normalized["dmppi_samples"])
     if "dmppi_temperature" in normalized and normalized["dmppi_temperature"] is not None:
         normalized["dmppi_temperature"] = float(normalized["dmppi_temperature"])
     return normalized
@@ -83,7 +83,7 @@ def configure_dmppi_controller(
     cfg.mpc_params["dpc_num_layers"] = policy_config.get("num_layers", 5)
     cfg.mpc_params["dpc_hidden_dim"] = policy_config.get("hidden_dim", 256)
     cfg.mpc_params["dpc_activation"] = policy_config.get("activation", "gelu")
-    cfg.mpc_params["dmppi_num_samples"] = int(dmppi_num_samples)
+    cfg.mpc_params["dmppi_samples"] = int(dmppi_num_samples)
     cfg.mpc_params["dmppi_temperature"] = float(dmppi_temperature)
 
 
@@ -128,7 +128,7 @@ def run_dmppi_test(
     print(f"Controller mode: {cfg.mpc_params['type']}")
     print(
         "DMPPI settings: "
-        f"num_dmppi_samples={cfg.mpc_params['dmppi_num_samples']}, "
+        f"dmppi_samples={cfg.mpc_params['dmppi_samples']}, "
         f"dmppi_temperature={cfg.mpc_params['dmppi_temperature']}"
     )
 
@@ -399,7 +399,7 @@ def main():
         dmppi_num_samples=(
             args.dmppi_num_samples
             if args.dmppi_num_samples is not None
-            else dmppi_config.get("num_dmppi_samples", 64)
+            else dmppi_config.get("dmppi_samples", 64)
         ),
         dmppi_temperature=(
             args.dmppi_temperature

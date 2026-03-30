@@ -253,14 +253,6 @@ def generate_dpc_dataset(
     rng = np.random.default_rng(seed)
     hip_height = qpympc_cfg.hip_height
 
-    print(
-        "Dataset rollout settings: "
-        f"ref_base_lin_vel={ref_base_lin_vel}, "
-        f"ref_base_ang_vel={ref_base_ang_vel}, "
-        f"goal_kp={goal_kp}, "
-        f"goal_max_lin_vel={goal_max_lin_vel}"
-    )
-
     env = QuadrupedEnv(
         robot=qpympc_cfg.robot,
         scene=qpympc_cfg.simulation_params["scene"],

@@ -617,7 +617,7 @@ class Sampling_MPC:
             state_current_jax[18:21] = reference_state["ref_foot_RL"].reshape((3,))
         if current_contact[3] == 0.0:
             state_current_jax[21:24] = reference_state["ref_foot_RR"].reshape((3,))
-
+        # print("ref_linear_velocity", reference_state["ref_linear_velocity"])
         reference_state_jax = np.concatenate(
             (
                 reference_state["ref_position"],

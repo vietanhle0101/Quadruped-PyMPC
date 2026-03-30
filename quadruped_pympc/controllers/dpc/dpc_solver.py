@@ -219,7 +219,6 @@ class DPC:
             state_current_jax = state_current_jax.at[18:21].set(jnp.asarray(reference_state["ref_foot_RL"]).reshape((3,)))
         if current_contact[3] == 0.0:
             state_current_jax = state_current_jax.at[21:24].set(jnp.asarray(reference_state["ref_foot_RR"]).reshape((3,)))
-
         reference_state_jax = jnp.concatenate(
             (
                 jnp.asarray(reference_state["ref_position"]),

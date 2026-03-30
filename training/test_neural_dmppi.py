@@ -1,5 +1,6 @@
 import argparse
 import copy
+import json
 import os
 import pathlib
 import sys
@@ -70,6 +71,63 @@ def normalize_dmppi_config(dmppi_config: dict):
     return normalized
 
 
+def sample_goal(qpympc_cfg, rng: np.random.Generator, initial_base_pos: np.ndarray):
+    ref_z = qpympc_cfg.simulation_params["ref_z"]
+    return np.array(
+        [
+            initial_base_pos[0] + rng.uniform(-5.0, 5.0),
+            initial_base_pos[1] + rng.uniform(-3.0, 3.0),
+            ref_z,
+        ],
+        dtype=float,
+    )
+
+
+def load_goal_set(goal_file: pathlib.Path | None):
+    if goal_file is None:
+        return None
+    with np.load(goal_file) as data:
+        return {
+            "goals": np.asarray(data["goal_base_positions"], dtype=float),
+            "initial_base_positions": np.asarray(data["initial_base_positions"], dtype=float)
+            if "initial_base_positions" in data
+            else None,
+        }
+
+
+def reset_episode_base_position(env, goal_set, episode_num: int):
+    if goal_set is None or goal_set.get("initial_base_positions") is None:
+        return
+    initial_base_pos = np.asarray(
+        goal_set["initial_base_positions"][min(episode_num, len(goal_set["initial_base_positions"]) - 1)],
+        dtype=float,
+    )
+    env.mjData.qpos[0:3] = initial_base_pos
+    env.mjData.qvel[0:6] = 0.0
+    mujoco.mj_forward(env.mjModel, env.mjData)
+
+
+def save_summary_json(script_name: str, summary: dict, seed: int, goal_file: pathlib.Path | None):
+    statistics_dir = REPO_ROOT / "statistics"
+    statistics_dir.mkdir(parents=True, exist_ok=True)
+    output_path = statistics_dir / f"{pathlib.Path(script_name).stem}_summary_seed_{seed}.json"
+    payload = {
+        "script": script_name,
+        "seed": int(seed),
+        "goal_file": None if goal_file is None else str(goal_file),
+        "goals_reached": int(summary["goals_reached"]),
+        "timeout": int(summary["timeout"]),
+        "truncated": int(summary["truncated"]),
+        "terminated": int(summary["terminated"]),
+        "success_rate": float(summary["success_rate"]),
+        "lap_times": np.asarray(summary["lap_times"], dtype=float).tolist(),
+    }
+    with open(output_path, "w", encoding="utf-8") as file:
+        json.dump(payload, file, indent=2)
+    print(f"Saved summary to {output_path}")
+    return output_path
+
+
 def configure_dmppi_controller(
     policy_file_path: pathlib.Path,
     policy_config: dict,
@@ -93,14 +151,16 @@ def run_dmppi_test(
     policy_config,
     qpympc_cfg,
     process=0,
-    num_episodes=1,
+    num_episodes=None,
     num_seconds_per_episode=30,
     ref_base_lin_vel=(0.0, 2.0),
     ref_base_ang_vel=(-0.4, 0.4),
     friction_coeff=(0.5, 1.0),
     base_vel_command_type="forward",
     goal_base_pos=None,
-    goal_kp=0.5,
+    goal_set=None,
+    random_goals=False,
+    goal_kp=1.0,
     goal_max_lin_vel=0.2,
     goal_position_tolerance=0.1,
     seed=0,
@@ -111,6 +171,7 @@ def run_dmppi_test(
 ):
     del process
     np.random.seed(seed)
+    rng = np.random.default_rng(seed)
     configure_dmppi_controller(
         policy_file_path,
         policy_config,
@@ -202,8 +263,41 @@ def run_dmppi_test(
     render_freq = 30
     steps_per_episode = int(num_seconds_per_episode // simulation_dt)
     last_render_time = time.time()
+    stats = {
+        "goal": 0,
+        "terminated": 0,
+        "truncated": 0,
+        "timeout": 0,
+    }
+    lap_times = []
+
+    if goal_set is not None:
+        num_episodes = len(goal_set["goals"])
+    elif num_episodes is None:
+        num_episodes = 1
 
     for episode_num in range(num_episodes):
+        env.reset(random=False)
+        reset_episode_base_position(env, goal_set, episode_num)
+        wrapper.reset(initial_feet_pos=env.feet_pos(frame="world"))
+        tau = LegsAttr(*[np.zeros((env.mjModel.nv, 1)) for _ in range(4)])
+        if render and goal_geom_id != -1:
+            goal_geom_id = render_sphere(
+                viewer=env.viewer,
+                position=np.array([0.0, 0.0, -10.0], dtype=float),
+                diameter=0.001,
+                color=[0, 0, 0, 0.0],
+                geom_id=goal_geom_id,
+            )
+
+        if goal_set is not None:
+            sampled_goal = np.asarray(goal_set["goals"][min(episode_num, len(goal_set["goals"]) - 1)], dtype=float)
+        elif random_goals:
+            sampled_goal = sample_goal(qpympc_cfg, rng, np.asarray(env.base_pos, dtype=float))
+        else:
+            sampled_goal = goal_base_pos
+
+        episode_outcome = "timeout"
         for _ in tqdm(range(steps_per_episode), desc=f"Ep:{episode_num:d}-steps:", total=steps_per_episode):
             feet_pos = env.feet_pos(frame="world")
             feet_vel = env.feet_vel(frame="world")
@@ -214,9 +308,9 @@ def run_dmppi_test(
             base_pos = copy.deepcopy(env.base_pos)
             com_pos = copy.deepcopy(env.com)
 
-            if goal_base_pos is not None:
-                goal_position_world = goal_base_pos if goal_base_pos.shape == (3,) else np.array(
-                    [goal_base_pos[0], goal_base_pos[1], base_pos[2]],
+            if sampled_goal is not None:
+                goal_position_world = sampled_goal if sampled_goal.shape == (3,) else np.array(
+                    [sampled_goal[0], sampled_goal[1], base_pos[2]],
                     dtype=float,
                 )
                 position_error = goal_position_world - base_pos
@@ -342,22 +436,47 @@ def run_dmppi_test(
                 env.render()
                 last_render_time = time.time()
 
-            reached_goal = goal_base_pos is not None and distance_to_goal is not None and distance_to_goal <= goal_position_tolerance
+            reached_goal = sampled_goal is not None and distance_to_goal is not None and distance_to_goal <= goal_position_tolerance
             if reached_goal:
-                print(f"Goal reached at {base_pos[:2]}")
-                env.close()
-                return
+                episode_outcome = "goal"
+                lap_times.append(float(env.simulation_time))
+                break
 
             if is_terminated or is_truncated or env.step_num >= steps_per_episode:
                 if is_terminated:
-                    print("Environment terminated")
-                    env.close()
-                    return
-                env.reset(random=True)
-                wrapper.reset(initial_feet_pos=env.feet_pos(frame="world"))
+                    episode_outcome = "terminated"
+                elif is_truncated:
+                    episode_outcome = "truncated"
+                else:
+                    episode_outcome = "timeout"
                 break
 
+        stats[episode_outcome] += 1
+        print(
+            f"[episode {episode_num:03d}] outcome={episode_outcome} "
+            f"goal={None if sampled_goal is None else np.asarray(sampled_goal[:2])}"
+        )
+
     env.close()
+    total = sum(stats.values())
+    success_rate = stats["goal"] / total if total > 0 else 0.0
+    summary = {
+        "goals_reached": stats["goal"],
+        "timeout": stats["timeout"],
+        "truncated": stats["truncated"],
+        "terminated": stats["terminated"],
+        "success_rate": success_rate,
+        "lap_times": np.asarray(lap_times, dtype=float),
+    }
+    print("Evaluation summary:")
+    print(f"  total_episodes: {total}")
+    print(f"  goals_reached: {summary['goals_reached']}")
+    print(f"  terminated: {summary['terminated']}")
+    print(f"  truncated: {summary['truncated']}")
+    print(f"  timeout: {summary['timeout']}")
+    print(f"  success_rate: {summary['success_rate']:.3f}")
+    print(f"  lap_times: {summary['lap_times']}")
+    return summary
 
 
 def main():
@@ -370,6 +489,8 @@ def main():
     parser.add_argument("--seed", type=int, default=0, help="Random seed.")
     parser.add_argument("--goal-x", type=float, default=1.0, help="Goal x position in world frame.")
     parser.add_argument("--goal-y", type=float, default=0.0, help="Goal y position in world frame.")
+    parser.add_argument("--random-goals", action="store_true", help="Sample a fresh random goal per episode, using the same seeded sampler as dataset generation.")
+    parser.add_argument("--goal-file", type=pathlib.Path, default=REPO_ROOT / "training" / "test_goals.npz", help="Optional .npz file with pre-generated goal_base_positions.")
     parser.add_argument(
         "--goal-max-lin-vel",
         type=float,
@@ -383,17 +504,21 @@ def main():
 
     policy_file_path = resolve_repo_path(args.policy_file)
     config_path = resolve_repo_path(args.config)
+    goal_file_path = resolve_repo_path(args.goal_file) if args.goal_file is not None else None
 
     config = load_config(config_path)
     policy_config = normalize_policy_config(dict(config.get("policy", {})))
     dmppi_config = normalize_dmppi_config(dict(config.get("dmppi", {})))
     goal_base_pos = np.array([args.goal_x, args.goal_y, cfg.simulation_params["ref_z"]], dtype=float)
+    goal_set = load_goal_set(goal_file_path) if goal_file_path is not None and goal_file_path.exists() else None
 
-    run_dmppi_test(
+    summary = run_dmppi_test(
         policy_file_path=policy_file_path,
         policy_config=policy_config,
         qpympc_cfg=cfg,
         goal_base_pos=goal_base_pos,
+        goal_set=goal_set,
+        random_goals=args.random_goals,
         goal_max_lin_vel=args.goal_max_lin_vel,
         seed=args.seed,
         render=not args.no_render,
@@ -409,6 +534,7 @@ def main():
             else dmppi_config.get("dmppi_temperature", 0.2)
         ),
     )
+    save_summary_json(pathlib.Path(__file__).name, summary, args.seed, goal_file_path if goal_set is not None else None)
 
 
 if __name__ == "__main__":

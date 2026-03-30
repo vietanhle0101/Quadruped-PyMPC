@@ -17,6 +17,9 @@ class DMPPI_Trainer(DPC_Trainer):
         super().__init__(dmppi_solver)
         self.dmppi_solver = dmppi_solver
         self.alpha = float(alpha)
+        self.beta = 0.0
+        self.m_samples = 8
+        self.updater_n_candidates = None
         self._eval_step = jax.jit(
             lambda params, batch, rollout_key: self._loss_and_metrics(params, batch, rollout_key)
         )

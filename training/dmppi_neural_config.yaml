@@ -1,4 +1,4 @@
-dataset_path: datasets/dpc_dataset_3M.npz
+dataset_path: datasets/dpc_dataset_2M.npz
 device: gpu
 
 policy:
@@ -15,9 +15,9 @@ dmppi:
   dmppi_samples: 512
   dmppi_temperature: 0.5
   alpha: 1e-2
-  beta: 1e0
-  m_samples: 64 # fewer mppi samples
-  updater_n_candidates: 4
+  beta: 1e1
+  m_samples: 256 # fewer mppi samples
+  updater_n_candidates: 16
 
 train_params:
   n_samples: 1000000

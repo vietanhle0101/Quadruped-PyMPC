@@ -153,8 +153,8 @@ def sample_goal(qpympc_cfg, rng, initial_base_pos):
     ref_z = qpympc_cfg.simulation_params["ref_z"]
     return np.array(
         [
-            initial_base_pos[0] + rng.uniform(-5.0, 5.0),
-            initial_base_pos[1] + rng.uniform(-3.0, 3.0),
+            initial_base_pos[0] + rng.uniform(-2.0, 2.0),
+            initial_base_pos[1] + rng.uniform(-2.0, 2.0),
             ref_z,
         ],
         dtype=float,

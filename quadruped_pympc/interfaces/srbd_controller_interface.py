@@ -145,7 +145,7 @@ class SRBDControllerInterface:
                     updater=updater,
                     device=cfg.mpc_params.get("device", "gpu"),
                     num_dmppi_samples=cfg.mpc_params.get("dmppi_samples", 64),
-                    dmppi_temperature=cfg.mpc_params.get("dmppi_temperature", 1.0),
+                    dmppi_temperature=cfg.mpc_params.get("dmppi_temperature", 0.2),
                 )
             else:
                 policy = NeuralGRFPolicy(

@@ -57,6 +57,7 @@ class Simulator_Node(Node):
         self.env.render()  
         self.env.viewer.user_scn.flags[mujoco.mjtRndFlag.mjRND_SHADOW] = False
         self.env.viewer.user_scn.flags[mujoco.mjtRndFlag.mjRND_REFLECTION] = False
+        self._update_camera_view()
 
         # Torque vector
         self.desired_tau = LegsAttr(*[np.zeros((int(self.env.mjModel.nu/4), 1)) for _ in range(4)])
@@ -86,8 +87,12 @@ class Simulator_Node(Node):
         self.desired_joints_position.FR = joints_position[3:6]
         self.desired_joints_position.RL = joints_position[6:9]
         self.desired_joints_position.RR = joints_position[9:12]
-        
-
+    
+    def _update_camera_view(self):
+        self.env.viewer.cam.azimuth = 140
+        self.env.viewer.cam.elevation = -25
+        self.env.viewer.cam.distance = 2.5
+        self.env.viewer.cam.lookat[:] = np.asarray(self.env.base_pos, dtype=float)
 
     def compute_simulator_step_callback(self):
 
@@ -118,6 +123,7 @@ class Simulator_Node(Node):
         # Render only at a certain frequency -----------------------------------------------------------------
         if time.time() - self.last_render_time > 1.0 / RENDER_FREQ:
             self.env.render()
+            self._update_camera_view()
             self.last_render_time = time.time()
 
 

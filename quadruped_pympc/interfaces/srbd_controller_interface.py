@@ -1,5 +1,6 @@
 import pathlib
 import pickle
+import sys
 
 import jax
 import numpy as np
@@ -106,16 +107,35 @@ class SRBDControllerInterface:
 
             self.controller = Sampling_MPC()
         elif self.type in {"dpc", "dmppi"}:
-            from quadruped_pympc.controllers.dpc.dpc_policy_jax import (
-                NeuralMPPIUpdate,
-                NeuralGRFDistributionPolicy,
-                NeuralGRFPolicy,
-            )
-            from quadruped_pympc.controllers.dpc.dpc_trainer import DPC_Trainer
-            if self.type == "dmppi":
-                from quadruped_pympc.controllers.dpc.dmppi_solver import DMPPI
-            else:
-                from quadruped_pympc.controllers.dpc.dpc_solver import DPC
+            try:
+                from quadruped_pympc.controllers.dpc.dpc_policy_jax import (
+                    NeuralMPPIUpdate,
+                    NeuralGRFDistributionPolicy,
+                    NeuralGRFPolicy,
+                )
+                from quadruped_pympc.controllers.dpc.dpc_trainer import DPC_Trainer
+                if self.type == "dmppi":
+                    from quadruped_pympc.controllers.dpc.dmppi_solver import DMPPI
+                else:
+                    from quadruped_pympc.controllers.dpc.dpc_solver import DPC
+            except ModuleNotFoundError as exc:
+                if exc.name != "quadruped_pympc.controllers.dpc":
+                    raise
+
+                repo_root = pathlib.Path(__file__).resolve().parents[3]
+                if str(repo_root) not in sys.path:
+                    sys.path.insert(0, str(repo_root))
+
+                from step_mppi.dpc_policy_jax import (
+                    NeuralMPPIUpdate,
+                    NeuralGRFDistributionPolicy,
+                    NeuralGRFPolicy,
+                )
+                from step_mppi.dpc_trainer import DPC_Trainer
+                if self.type == "dmppi":
+                    from step_mppi.dmppi_solver import DMPPI
+                else:
+                    from step_mppi.dpc_solver import DPC
 
             checkpoint_path = cfg.mpc_params.get("dpc_policy_path")
             if checkpoint_path is None:
